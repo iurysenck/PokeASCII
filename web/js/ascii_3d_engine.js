@@ -968,9 +968,23 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       }
     }
 
+    // 5. Gera índice LOD otimizado para o Mapa 3D (preserva 100% dos olhos/rosto e reduz micro-triângulos distantes no mobile)
+    const eyeSet = new Set(eyeCheckIndices);
+    let lodIndices = rawIndices;
+    if (rawIndices.length > 6000) {
+      lodIndices = [];
+      for (let t = 0; t + 2 < rawIndices.length; t += 3) {
+        const i0 = rawIndices[t], i1 = rawIndices[t + 1], i2 = rawIndices[t + 2];
+        if (eyeSet.has(i0) || eyeSet.has(i1) || eyeSet.has(i2) || ((t / 3) & 1) === 0) {
+          lodIndices.push(i0, i1, i2);
+        }
+      }
+    }
+
     return {
       verts: rawVerts,
       indices: rawIndices,
+      lodIndices,
       textures,
       isReal3DGlb: true
     };
@@ -1010,6 +1024,9 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     appendBox(m,  spreadX*0.88, headY, headZ+0.05, eyeSize*0.65, eyeSize*0.80, 0.04, eyeCol || pup, 0.25);
   }
 
+  // Escala visual proporcional ao Avatar Humano (1.85m) no Mapa 3D:
+  // Pokémons pequenos (0.3m..0.7m como Pikachu, Charmander, Bulbasaur, Squirtle) ficam na altura do joelho/cintura (0.42..0.54),
+  // médios (1.2m..1.8m como Charizard, Arcanine) ficam em 0.72..0.85, e gigantes (Gyarados, Snorlax) em 0.95..1.25!
   function computeVisualScale(speciesIdOrHeight, scaleVariation = 1.0) {
     let h = 1.0;
     if (window.PokeData && Number.isInteger(speciesIdOrHeight) && speciesIdOrHeight >= 1) {
@@ -1018,7 +1035,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     } else {
       h = Math.max(0.25, speciesIdOrHeight || 1.0);
     }
-    return Math.max(0.72, Math.min(1.85, (0.68 + 0.42 * Math.sqrt(h)) * (scaleVariation || 1.0)));
+    return Math.max(0.38, Math.min(1.28, (0.24 + 0.36 * Math.sqrt(h)) * (scaleVariation || 1.0)));
   }
 
   function getPokemonMesh(speciesId, isShiny = false) {

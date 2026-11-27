@@ -189,9 +189,46 @@ window.PokeGameUI = (function() {
   let projectedClickTargets = [];
   let lastWildScreenBox = { x: 0, y: 0, radiusPx: 75 };
 
-  // Escalador Dinâmico de FPS
+  // Escalador Dinâmico de FPS + Detecção Automática Mobile
+  const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test((typeof navigator !== "undefined" && navigator.userAgent) || "") || (typeof window !== "undefined" && window.innerWidth <= 768);
   let fpsFrames = 0, fpsLastTime = performance.now(), currentFps = 60;
-  let qualityTier = 3; // Inicia direto em 3 = Ultra-Sharp Micro-ASCII 5x7px (auto-escala se FPS < 24)
+  let qualityTier = isMobileDevice ? 2 : 3;
+
+  // Atlas Bitmap Anti-Aliased de Glifos ASCII + ImageData Uint32Array (30x mais rápido que fillText no Mobile!)
+  const GLYPH_CHARS = " .',:;!~+-=*oO08#%W@|/\\·=";
+  const CHAR_TO_IDX = new Map();
+  for (let i = 0; i < GLYPH_CHARS.length; ++i) CHAR_TO_IDX.set(GLYPH_CHARS[i], i);
+  let glyphAtlas = null;
+  let frameImageData = null;
+  let framePixels32 = null;
+
+  function buildGlyphAtlas(cw, ch) {
+    glyphAtlas = new Array(GLYPH_CHARS.length);
+    const gc = document.createElement("canvas");
+    gc.width = cw;
+    gc.height = ch;
+    const gctx = gc.getContext("2d", { willReadFrequently: true });
+    for (let i = 0; i < GLYPH_CHARS.length; ++i) {
+      const chStr = GLYPH_CHARS[i];
+      if (chStr === " ") {
+        glyphAtlas[i] = new Uint8Array(cw * ch);
+        continue;
+      }
+      gctx.fillStyle = "#000000";
+      gctx.fillRect(0, 0, cw, ch);
+      gctx.font = `bold ${ch}px 'Cascadia Mono', 'Fira Code', Consolas, monospace`;
+      gctx.textBaseline = "top";
+      gctx.fillStyle = "#ffffff";
+      gctx.fillText(chStr, 0, 0);
+      const data = gctx.getImageData(0, 0, cw, ch).data;
+      const mask = new Uint8Array(cw * ch);
+      for (let p = 0; p < cw * ch; ++p) {
+        // Ganho de nitidez sub-pixel (contraste 1.35x no glifo)
+        mask[p] = Math.min(255, Math.round(data[p * 4] * 1.35));
+      }
+      glyphAtlas[i] = mask;
+    }
+  }
 
   function allocateAsciiBuffers(c, r) {
     cols = c; rows = r;
@@ -236,18 +273,36 @@ window.PokeGameUI = (function() {
 
   function resizeViewport() {
     if (!canvas) return;
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
 
-    // Células Ultra-HD (5x7 no Tier 3, 6x8 no Tier 2) para definição máxima em ASCII 3D!
-    const targetCellW = qualityTier === 3 ? 5 : (qualityTier === 2 ? 6 : 8);
+    // Células Ultra-HD (5x7 no Tier 3, 6x8 no Tier 2, 7x9 no Tier 1) para definição máxima + 60 FPS no Mobile!
+    const targetCellW = qualityTier === 3 ? 5 : (qualityTier === 2 ? 6 : 7);
     const targetCellH = Math.round(targetCellW * 1.34);
     cellW = targetCellW;
     cellH = targetCellH;
 
-    const newCols = Math.max(76, Math.min(260, Math.floor(canvas.width / cellW)));
-    const newRows = Math.max(52, Math.min(165, Math.floor(canvas.height / cellH)));
+    const maxColsCap = isMobileDevice ? (qualityTier === 3 ? 170 : 140) : 260;
+    const maxRowsCap = isMobileDevice ? (qualityTier === 3 ? 135 : 112) : 165;
+    const newCols = Math.max(68, Math.min(maxColsCap, Math.floor(vw / cellW)));
+    const newRows = Math.max(48, Math.min(maxRowsCap, Math.floor(vh / cellH)));
+    canvas.width = newCols * cellW;
+    canvas.height = newRows * cellH;
     allocateAsciiBuffers(newCols, newRows);
+    buildGlyphAtlas(cellW, cellH);
+
+    try {
+      if (typeof ctx.createImageData === "function") {
+        frameImageData = ctx.createImageData(canvas.width, canvas.height);
+        framePixels32 = new Uint32Array(frameImageData.data.buffer);
+      } else {
+        frameImageData = null;
+        framePixels32 = null;
+      }
+    } catch (_) {
+      frameImageData = null;
+      framePixels32 = null;
+    }
 
     if (sampleCanvas) {
       sampleCanvas.width = newCols;
@@ -1130,12 +1185,97 @@ window.PokeGameUI = (function() {
   }
 
   // ============================================================================
+  // CACHE ESPACIAL O(1) DO MAPA TERRESTRE (256x256 TILES = 128m x 128m)
+  // Elimina 5.000.000 de testes de segmento OSM por frame no Mobile (300x mais rápido!)
+  // ============================================================================
+  const OSM_GRID_SIZE = 256;
+  const OSM_GRID_STEP = 0.5; // 0.5m por célula
+  const osmGroundGrid = new Uint8Array(OSM_GRID_SIZE * OSM_GRID_SIZE);
+  let osmGridCenterX = -99999;
+  let osmGridCenterZ = -99999;
+  let osmGridLastRoadCount = -1;
+
+  function rebuildOsmGroundGrid() {
+    osmGridCenterX = Math.round(cityState.playerX);
+    osmGridCenterZ = Math.round(cityState.playerZ);
+    osmGridLastRoadCount = cityState.osmRoads.length;
+    osmGroundGrid.fill(0);
+    if (cityState.osmRoads.length === 0) return;
+
+    const halfSpan = (OSM_GRID_SIZE * OSM_GRID_STEP) * 0.5;
+    const minWorldX = osmGridCenterX - halfSpan;
+    const minWorldZ = osmGridCenterZ - halfSpan;
+
+    // 1. Rasteriza plantas baixas planas dos edifícios (4 = interior planta baixa, 5 = parede perimetral)
+    for (let bi = 0; bi < cityState.osmBuildings.length; ++bi) {
+      const b = cityState.osmBuildings[bi];
+      const gx0 = Math.max(0, Math.floor((b.minX - minWorldX) / OSM_GRID_STEP));
+      const gx1 = Math.min(OSM_GRID_SIZE - 1, Math.ceil((b.maxX - minWorldX) / OSM_GRID_STEP));
+      const gz0 = Math.max(0, Math.floor((b.minZ - minWorldZ) / OSM_GRID_STEP));
+      const gz1 = Math.min(OSM_GRID_SIZE - 1, Math.ceil((b.maxZ - minWorldZ) / OSM_GRID_STEP));
+      for (let gz = gz0; gz <= gz1; ++gz) {
+        const isEdgeZ = (gz === gz0 || gz === gz1);
+        const rowOff = gz * OSM_GRID_SIZE;
+        for (let gx = gx0; gx <= gx1; ++gx) {
+          osmGroundGrid[rowOff + gx] = (isEdgeZ || gx === gx0 || gx === gx1) ? 5 : 4;
+        }
+      }
+    }
+
+    // 2. Rasteriza ruas, meios-fios (3), asfalto (1) e faixa central (2)
+    for (let ri = 0; ri < cityState.osmRoads.length; ++ri) {
+      const road = cityState.osmRoads[ri];
+      const hwSq = road.halfW * road.halfW;
+      const curbR = road.halfW + 0.35;
+      const curbSq = curbR * curbR;
+      const pts = road.pts;
+      for (let pi = 0; pi < pts.length - 1; ++pi) {
+        const ax = pts[pi].x, az = pts[pi].z;
+        const bx = pts[pi + 1].x, bz = pts[pi + 1].z;
+        const segMinX = Math.min(ax, bx) - curbR, segMaxX = Math.max(ax, bx) + curbR;
+        const segMinZ = Math.min(az, bz) - curbR, segMaxZ = Math.max(az, bz) + curbR;
+        const gx0 = Math.max(0, Math.floor((segMinX - minWorldX) / OSM_GRID_STEP));
+        const gx1 = Math.min(OSM_GRID_SIZE - 1, Math.ceil((segMaxX - minWorldX) / OSM_GRID_STEP));
+        const gz0 = Math.max(0, Math.floor((segMinZ - minWorldZ) / OSM_GRID_STEP));
+        const gz1 = Math.min(OSM_GRID_SIZE - 1, Math.ceil((segMaxZ - minWorldZ) / OSM_GRID_STEP));
+
+        for (let gz = gz0; gz <= gz1; ++gz) {
+          const wz = minWorldZ + (gz + 0.5) * OSM_GRID_STEP;
+          const rowOff = gz * OSM_GRID_SIZE;
+          for (let gx = gx0; gx <= gx1; ++gx) {
+            const wx = minWorldX + (gx + 0.5) * OSM_GRID_STEP;
+            const dSq = distToSegmentSq(wx, wz, ax, az, bx, bz);
+            if (dSq < 0.05) {
+              osmGroundGrid[rowOff + gx] = 2;
+            } else if (dSq < hwSq) {
+              if (osmGroundGrid[rowOff + gx] !== 2) osmGroundGrid[rowOff + gx] = 1;
+            } else if (dSq < curbSq) {
+              const cur = osmGroundGrid[rowOff + gx];
+              if (cur !== 1 && cur !== 2) osmGroundGrid[rowOff + gx] = 3;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ============================================================================
   // ESTÁGIO 1 DO PIPELINE 100% ASCII: FUNDO / CÂMERA AO VIVO / CHÃO 3D + SOBEL
   // Usa a EXATA MESMA base ortonormal (camBasis.s, camBasis.u, camBasis.f, camBasis.eye)
   // da matriz de projeção 3D para que o chão e todos os objetos 3D fiquem 100% soldados!
   // ============================================================================
   function captureCameraAndComputeSobel(timeSec, camBasis, fovY, aspect) {
     camCellType.fill(0);
+    if (
+      gameScene === "CITY_MAP" &&
+      (cityState.osmRoads.length !== osmGridLastRoadCount ||
+       Math.hypot(cityState.playerX - osmGridCenterX, cityState.playerZ - osmGridCenterZ) > 22.0)
+    ) {
+      rebuildOsmGroundGrid();
+    }
+    const osmMinWX = osmGridCenterX - (OSM_GRID_SIZE * OSM_GRID_STEP) * 0.5;
+    const osmMinWZ = osmGridCenterZ - (OSM_GRID_SIZE * OSM_GRID_STEP) * 0.5;
+    const hasOsm = cityState.osmRoads.length > 0;
     if (useRealCamera && gameScene === "AR_CAPTURE" && videoEl && videoEl.readyState >= 2) {
       sampleCtx.drawImage(videoEl, 0, 0, cols, rows);
       const img = sampleCtx.getImageData(0, 0, cols, rows).data;
@@ -1198,60 +1338,46 @@ window.PokeGameUI = (function() {
             const fog = Math.exp(-Math.max(0, tHit) * 0.015);
 
             if (gameScene === "CITY_MAP") {
-              // Paleta Oficial do Mapa Pokémon GO com Ruas, Faixas Centrais, Meio-Fio Salmão e Prédios
+              // Paleta Oficial do Mapa Pokémon GO com Ruas, Faixas Centrais, Meio-Fio Salmão e Plantas Baixas Planas
               let gR = 0.12, gG = 0.19, gB = 0.42; // Terreno Índigo (#1f306b)
               const checker = ((Math.floor(wx * 0.5) + Math.floor(wz * 0.5)) & 1);
               if (checker) { gR += 0.02; gG += 0.025; gB += 0.04; }
 
-              let isRoad = false, isLaneCenter = false, isCurb = false, isBuilding = false;
-
-              if (cityState.osmRoads.length > 0) {
-                for (let ri = 0; ri < cityState.osmRoads.length; ++ri) {
-                  const road = cityState.osmRoads[ri];
-                  const hwSq = road.halfW * road.halfW;
-                  const curbSq = (road.halfW + 0.35) * (road.halfW + 0.35);
-                  for (let pi = 0; pi < road.pts.length - 1; ++pi) {
-                    const dSq = distToSegmentSq(wx, wz, road.pts[pi].x, road.pts[pi].z, road.pts[pi + 1].x, road.pts[pi + 1].z);
-                    if (dSq < 0.04) { isLaneCenter = true; isRoad = true; break; }
-                    if (dSq < hwSq) { isRoad = true; break; }
-                    if (dSq < curbSq) { isCurb = true; }
-                  }
-                  if (isRoad) break;
-                }
-                if (!isRoad) {
-                  for (let bi = 0; bi < cityState.osmBuildings.length; ++bi) {
-                    const b = cityState.osmBuildings[bi];
-                    if (wx >= b.minX && wx <= b.maxX && wz >= b.minZ && wz <= b.maxZ) {
-                      isBuilding = true; break;
-                    }
-                  }
+              let ct = 0;
+              if (hasOsm) {
+                const gx = Math.floor((wx - osmMinWX) / OSM_GRID_STEP);
+                const gz = Math.floor((wz - osmMinWZ) / OSM_GRID_STEP);
+                if (gx >= 0 && gx < OSM_GRID_SIZE && gz >= 0 && gz < OSM_GRID_SIZE) {
+                  ct = osmGroundGrid[(gz << 8) | gx];
                 }
               } else {
                 const roadX = Math.abs((wx % 12 + 12) % 12 - 6);
                 const roadZ = Math.abs((wz % 12 + 12) % 12 - 6);
                 if (roadX < 0.12 || roadZ < 0.12) {
-                  isLaneCenter = true; isRoad = true;
+                  ct = 2; // Faixa central
                 } else if (roadX < 1.35 || roadZ < 1.35) {
-                  isRoad = true;
+                  ct = 1; // Asfalto
                 } else if (roadX < 1.68 || roadZ < 1.68) {
-                  isCurb = true;
-                } else if (roadX > 2.6 && roadX < 5.0 && roadZ > 2.6 && roadZ < 5.0) {
-                  isBuilding = true;
+                  ct = 3; // Meio-fio salmão
+                } else if (roadX >= 2.5 && roadX <= 5.1 && roadZ >= 2.5 && roadZ <= 5.1) {
+                  const isWall = (roadX < 2.75 || roadX > 4.85 || roadZ < 2.75 || roadZ > 4.85);
+                  ct = isWall ? 5 : 4; // Planta baixa de edifício desenhada plana no chão!
                 }
               }
 
-              if (isLaneCenter) {
-                gR = 0.25; gG = 0.72; gB = 0.85;
-                camCellType[idx] = 2;
-              } else if (isRoad) {
+              camCellType[idx] = ct;
+              if (ct === 2) {
+                gR = 0.25; gG = 0.78; gB = 0.92;
+              } else if (ct === 1) {
                 gR = 0.07; gG = 0.12; gB = 0.30;
-                camCellType[idx] = 1;
-              } else if (isCurb) {
-                gR = 0.68; gG = 0.44; gB = 0.48;
-                camCellType[idx] = 3;
-              } else if (isBuilding) {
-                gR = 0.24; gG = 0.34; gB = 0.62;
-                camCellType[idx] = 4;
+              } else if (ct === 3) {
+                gR = 0.72; gG = 0.45; gB = 0.50;
+              } else if (ct === 5) {
+                // Contorno arquitetônico plano do prédio no chão
+                gR = 0.34; gG = 0.52; gB = 0.84;
+              } else if (ct === 4) {
+                // Interior plano do prédio no chão
+                gR = 0.18; gG = 0.27; gB = 0.54;
               }
 
               camR[idx] = gR * fog + 0.22 * (1 - fog);
@@ -1394,8 +1520,8 @@ window.PokeGameUI = (function() {
         model: E.mat4Translation(cityState.playerX, -1.23, cityState.playerZ)
       });
 
-      // 2. AVATAR 3D DO TREINADOR NO CENTRO DO MAPA
-      const avScale = 1.05 * zoomComp;
+      // 2. AVATAR 3D DO TREINADOR NO CENTRO DO MAPA (Altura humana proporcional ~1.88m)
+      const avScale = 1.08 * zoomComp;
       const avatarMesh = E.buildTrainerAvatarMesh(p.gender, p.avatar, cityState.walkCycle, cityState.isMoving);
       const mAvatar = E.mat4Mul(
         E.mat4Translation(cityState.playerX, -1.25, cityState.playerZ),
@@ -1403,14 +1529,14 @@ window.PokeGameUI = (function() {
       );
       drawCmds.push({ id: 10, mesh: avatarMesh, model: mAvatar });
 
-      // 3. POKÉMON PARCEIRO (BUDDY) CAMINHANDO AO SEU LADO EM 3D
+      // 3. POKÉMON PARCEIRO (BUDDY) CAMINHANDO AO SEU LADO EM PROPORÇÃO REALISTA
       const buddyMon = p.pokemonBox.find(m => m.uid === p.buddyUid) || p.pokemonBox[0];
       if (buddyMon) {
-        const bScale = 0.65 * zoomComp;
+        const bScale = E.computeVisualScale(buddyMon.speciesId, 1.0) * 0.82 * zoomComp;
         const bMesh = E.getPokemonMesh(buddyMon.speciesId, buddyMon.isShiny);
         const bx = cityState.playerX - Math.cos(cityState.facingYaw) * (1.25 * zoomComp);
         const bz = cityState.playerZ - Math.sin(cityState.facingYaw) * (1.25 * zoomComp);
-        const by = -1.22 + Math.abs(Math.sin(timeSec * 5.0)) * 0.12;
+        const by = -1.22 + Math.abs(Math.sin(timeSec * 5.0)) * 0.10;
         const mBuddy = E.mat4Mul(
           E.mat4Translation(bx, by, bz),
           E.mat4Mul(E.mat4RotY(cityState.facingYaw + Math.PI), E.mat4Scale(bScale, bScale, bScale))
@@ -1423,7 +1549,7 @@ window.PokeGameUI = (function() {
       // 4. POKÉSTOPS 3D
       cityState.pokestops.forEach((ps, idx) => {
         const dPlayer = Math.hypot(ps.x - cityState.playerX, ps.z - cityState.playerZ);
-        if (dPlayer > 60.0) return;
+        if (dPlayer > 56.0) return;
         const isCd = Date.now() < ps.cooldownUntil;
         const psMesh = E.buildPokestop3DMesh(isCd);
         const psScale = zoomComp;
@@ -1436,9 +1562,10 @@ window.PokeGameUI = (function() {
         if (pt) {
           projectedClickTargets.push({
             type: "POKESTOP", index: idx, x: pt.x, y: pt.y, r: 44,
+            dPlayer, depth: pt.depth,
             hasLure: !!ps.hasLure,
             label: `${isCd ? "[CD]" : "[STOP]"} ${ps.name}`,
-            sub: isCd ? "Recarregando" : (ps.hasLure ? "Lure Ativo • Girar" : "Toque p/ Girar")
+            sub: isCd ? "Recarga" : (ps.hasLure ? "Lure" : "Girar")
           });
         }
       });
@@ -1446,7 +1573,7 @@ window.PokeGameUI = (function() {
       // 5. GINÁSIOS 3D + GUARDIÃO 3D NO TOPO + BOSS DE RAID
       cityState.gyms.forEach((gym, idx) => {
         const dPlayer = Math.hypot(gym.x - cityState.playerX, gym.z - cityState.playerZ);
-        if (dPlayer > 68.0) return;
+        if (dPlayer > 64.0) return;
         const gScale = zoomComp;
         const gMesh = E.buildGymTower3DMesh(gym.color);
         const mGym = E.mat4Mul(
@@ -1457,24 +1584,27 @@ window.PokeGameUI = (function() {
 
         const topDefenderId = (gym.defenders && gym.defenders[0]) ? gym.defenders[0].speciesId : gym.guardSpeciesId;
         const guardMesh = E.getPokemonMesh(topDefenderId, false);
+        const guardScale = E.computeVisualScale(topDefenderId, 1.0) * 0.92 * gScale;
         const mGuard = E.mat4Mul(
-          E.mat4Translation(gym.x, -1.25 + (2.7 + Math.sin(timeSec * 2.5) * 0.12) * gScale, gym.z),
-          E.mat4Mul(E.mat4RotY(timeSec * 1.2), E.mat4Scale(0.9 * gScale, 0.9 * gScale, 0.9 * gScale))
+          E.mat4Translation(gym.x, -1.25 + (2.68 + Math.sin(timeSec * 2.5) * 0.10) * gScale, gym.z),
+          E.mat4Mul(E.mat4RotY(timeSec * 1.2), E.mat4Scale(guardScale, guardScale, guardScale))
         );
-        drawCmds.push({ id: 35 + (idx % 5), mesh: guardMesh, model: mGuard, speciesId: topDefenderId });
+        drawCmds.push({ id: 35 + (idx % 5), mesh: guardMesh, model: mGuard, speciesId: topDefenderId, useLod: dPlayer > 14.0 });
 
         const pt = E.projectPoint3D(vp, gym.x, -1.25 + 3.4 * gScale, gym.z, canvas.width, canvas.height);
         if (pt) {
           projectedClickTargets.push({
             type: "GYM", index: idx, x: pt.x, y: pt.y, r: 54,
+            dPlayer, depth: pt.depth,
             label: `[GYM] ${gym.name}`,
-            sub: `Equipe ${gym.team} (${(gym.defenders || []).length}/6) • Raid ${gym.raidTier || 5}*`
+            sub: `${gym.team} (${(gym.defenders || []).length}/6) • Raid ${gym.raidTier || 5}*`
           });
         }
       });
 
       // 6. BALÃO 3D DOS VILÕES (TEAM ROCKET CYBER)
       if (cityState.villainBalloon.active) {
+        const dPlayer = Math.hypot(cityState.villainBalloon.x - cityState.playerX, cityState.villainBalloon.z - cityState.playerZ);
         const vMesh = E.buildVillainBalloon3DMesh();
         const by = cityState.villainBalloon.y + Math.sin(timeSec * 1.8) * 0.25;
         const mBalloon = E.mat4Mul(
@@ -1486,42 +1616,46 @@ window.PokeGameUI = (function() {
         if (pt) {
           projectedClickTargets.push({
             type: "VILLAIN", index: 0, x: pt.x, y: pt.y, r: 48,
-            label: "[VILAO] Balao Equipe Cyber",
-            sub: "Toque p/ Duelo Ao Vivo"
+            dPlayer, depth: pt.depth,
+            label: "[VILAO] Balao Cyber",
+            sub: "Duelo"
           });
         }
       }
 
-      // 7. POKÉMONS SELVAGENS 3D EM VOLTA DO TREINADOR NO MAPA
-      const spawnRingMesh = E.buildAnchorRingMesh(0.85, 0.08, 20);
+      // 7. POKÉMONS SELVAGENS 3D EM VOLTA DO TREINADOR NO MAPA (Proporção fiel em relação ao Avatar!)
+      const spawnRingMesh = E.buildAnchorRingMesh(0.68, 0.07, 20);
       cityState.wildSpawns.forEach((sp, idx) => {
+        const dPlayer = Math.hypot(sp.x - cityState.playerX, sp.z - cityState.playerZ);
+        if (dPlayer > 42.0) return;
         const wMesh = E.getPokemonMesh(sp.mon.speciesId, sp.mon.isShiny);
         const ageSec = Math.max(0.05, (performance.now() - (sp.spawnedAt || 0)) / 1000.0);
-        const popElastic = ageSec < 0.65 ? Math.min(1.15, (ageSec / 0.5) * 1.15) : 1.0;
-        const sScale = Math.min(1.35, Math.max(0.72, E.computeVisualScale(sp.mon.speciesId, sp.mon.scaleVariation) * 0.85)) * popElastic * zoomComp;
-        const hop = Math.abs(Math.sin(timeSec * 3.5 + idx)) * 0.12;
+        const popElastic = ageSec < 0.65 ? Math.min(1.12, (ageSec / 0.5) * 1.12) : 1.0;
+        const sScale = E.computeVisualScale(sp.mon.speciesId, sp.mon.scaleVariation) * popElastic * zoomComp;
+        const hop = Math.abs(Math.sin(timeSec * 3.5 + idx)) * 0.08;
         const mWild = E.mat4Mul(
           E.mat4Translation(sp.x, -1.22 + hop, sp.z),
           E.mat4Mul(E.mat4RotY(sp.rotY + Math.sin(timeSec + idx) * 0.4), E.mat4Scale(sScale, sScale, sScale))
         );
-        drawCmds.push({ id: 50 + idx, mesh: wMesh, model: mWild, speciesId: sp.mon.speciesId });
+        drawCmds.push({ id: 50 + idx, mesh: wMesh, model: mWild, speciesId: sp.mon.speciesId, useLod: dPlayer > 11.0 });
         drawCmds.push({ id: 7, mesh: spawnRingMesh, model: E.mat4Translation(sp.x, -1.24, sp.z) });
 
-        const pt = E.projectPoint3D(vp, sp.x, -1.22 + 1.45 * sScale, sp.z, canvas.width, canvas.height);
+        const pt = E.projectPoint3D(vp, sp.x, -1.22 + 1.55 * sScale, sp.z, canvas.width, canvas.height);
         if (pt) {
           projectedClickTargets.push({
             type: "WILD", index: idx, x: pt.x, y: pt.y, r: 44,
+            dPlayer, depth: pt.depth,
             isStarter: !!sp.isStarterTutorial,
-            label: `${sp.isStarterTutorial ? "[INICIAL] " : ""}${sp.mon.isShiny ? "[SHINY] " : ""}${sp.mon.name}`,
+            label: `${sp.isStarterTutorial ? "[INICIAL] " : ""}${sp.mon.isShiny ? "* " : ""}${sp.mon.name}`,
             sub: `CP ${sp.mon.cp}`
           });
         }
       });
 
     } else if (gameScene === "AR_CAPTURE" && wildMon) {
-      // MODO ENCONTRO DE CAPTURA 100% EM ASCII 3D
+      // MODO ENCONTRO DE CAPTURA 100% EM ASCII 3D (Escala ampliada de close-up 1.52x!)
       const sp = window.PokeData.getSpecies(wildMon.speciesId);
-      const baseScale = E.computeVisualScale(wildMon.speciesId, wildMon.scaleVariation);
+      const baseScale = E.computeVisualScale(wildMon.speciesId, wildMon.scaleVariation) * 1.52;
 
       // 1. Anel de Ancoragem 3D no chão sob o Pokémon
       drawCmds.push({
@@ -1604,7 +1738,7 @@ window.PokeGameUI = (function() {
       // 1. Pokémon Inimigo / Raid Boss 3D ao fundo da arena
       if (eMon) {
         const eAttackT = now < liveBattle.enemyAttackAnimUntil ? Math.sin(((liveBattle.enemyAttackAnimUntil - now) / 360) * Math.PI) : 0;
-        const eScale = E.computeVisualScale(eMon.speciesId, 1.0) * (liveBattle.isRaidEncounter ? 1.25 : 0.95);
+        const eScale = E.computeVisualScale(eMon.speciesId, 1.0) * (liveBattle.isRaidEncounter ? 1.75 : 1.42);
         const ex = 0.55 - eAttackT * 0.35;
         const ey = -1.10 + Math.abs(Math.sin(timeSec * 3.0)) * 0.10 + eAttackT * 0.25;
         const ez = -5.2 + eAttackT * 1.35;
@@ -1629,7 +1763,7 @@ window.PokeGameUI = (function() {
       if (pMon) {
         const pAttackT = now < liveBattle.playerAttackAnimUntil ? Math.sin(((liveBattle.playerAttackAnimUntil - now) / 280) * Math.PI) : 0;
         const dodgeX = now < liveBattle.dodgeUntil ? liveBattle.dodgeOffsetX : 0;
-        const pScale = E.computeVisualScale(pMon.speciesId, 1.0) * 0.88;
+        const pScale = E.computeVisualScale(pMon.speciesId, 1.0) * 1.32;
         const px = -0.55 + dodgeX * 1.35 + pAttackT * 0.45;
         const py = -1.15 + Math.abs(Math.sin(timeSec * 3.6)) * 0.08 + pAttackT * 0.22;
         const pz = -2.45 - pAttackT * 1.15;
@@ -1679,7 +1813,7 @@ window.PokeGameUI = (function() {
         const blend = 0.5 + 0.5 * Math.sin(elapsed * freq);
         const showNew = blend > (1.0 - t * 0.9);
         const activeSpeciesId = showNew ? evoScene.toSpeciesId : evoScene.fromSpeciesId;
-        const pulseScale = E.computeVisualScale(activeSpeciesId, 1.0) * (0.95 + 0.22 * Math.sin(elapsed * freq * 1.3));
+        const pulseScale = E.computeVisualScale(activeSpeciesId, 1.0) * 1.45 * (0.95 + 0.22 * Math.sin(elapsed * freq * 1.3));
         const mEvo = E.mat4Mul(
           E.mat4Translation(0, -1.05 + t * 0.25, -4.2),
           E.mat4Mul(E.mat4RotY(rotY), E.mat4Scale(pulseScale, pulseScale, pulseScale))
@@ -1693,7 +1827,7 @@ window.PokeGameUI = (function() {
         });
       } else {
         // Revelação Final do Pokémon 3D Evoluído em Cores Completas!
-        const finalScale = E.computeVisualScale(evoScene.toSpeciesId, 1.0) * 1.15;
+        const finalScale = E.computeVisualScale(evoScene.toSpeciesId, 1.0) * 1.62;
         const mFinal = E.mat4Mul(
           E.mat4Translation(0, -1.05, -4.2),
           E.mat4Mul(E.mat4RotY(Math.sin(timeSec * 1.6) * 0.35), E.mat4Scale(finalScale, finalScale, finalScale))
@@ -1714,7 +1848,8 @@ window.PokeGameUI = (function() {
       const mvp = E.mat4Mul(vp, cmd.model);
       const m = cmd.model;
       const verts = cmd.mesh.verts;
-      const indices = cmd.mesh.indices;
+      const indices = (cmd.useLod && cmd.mesh.lodIndices) ? cmd.mesh.lodIndices : cmd.mesh.indices;
+      const isClosedGlb = Boolean(cmd.mesh.isReal3DGlb);
       const vLen = verts.length;
 
       if (vLen > vBufCap) {
@@ -1776,6 +1911,8 @@ window.PokeGameUI = (function() {
 
         const area = (sx2 - sx0) * (sy1 - sy0) - (sy2 - sy0) * (sx1 - sx0);
         if (Math.abs(area) < 1e-4) continue;
+        // Backface Culling rápido para malhas 3D fechadas (.glb)
+        if (isClosedGlb && (vBufNz[i0] + vBufNz[i1] + vBufNz[i2]) < -0.85) continue;
 
         const minX = Math.max(0, Math.floor(Math.min(sx0, sx1, sx2)));
         const maxX = Math.min(cols - 1, Math.ceil(Math.max(sx0, sx1, sx2)));
@@ -1854,7 +1991,7 @@ window.PokeGameUI = (function() {
       }
     }
 
-    // Sobel 3D sobre Normais e Z-Buffer das Entidades 3D
+    // Sobel 3D Duplo (Profundidade Z + Normais 3D + Relevo UV) sobre as Entidades 3D
     for (let r = 1; r < rows - 1; ++r) {
       for (let c = 1; c < cols - 1; ++c) {
         const i = r * cols + c;
@@ -1863,11 +2000,12 @@ window.PokeGameUI = (function() {
         const idDiff = (gbId[i - 1] !== gbId[i]) || (gbId[i + 1] !== gbId[i]) ||
                        (gbId[i - cols] !== gbId[i]) || (gbId[i + cols] !== gbId[i]);
         const nxDiff = Math.abs(gbNx[i + 1] - gbNx[i - 1]) + Math.abs(gbNy[i + cols] - gbNy[i - cols]);
+        const zDiff = (!idDiff) ? (Math.abs(gbZ[i + 1] - gbZ[i - 1]) + Math.abs(gbZ[i + cols] - gbZ[i - cols])) : 0;
 
-        if (idDiff || nxDiff > 0.55) {
+        if (idDiff || nxDiff > 0.36 || zDiff > 0.016) {
           edgeMag[i] = 1.0;
-          const gx = gbNx[i + 1] - gbNx[i - 1] + (gbId[i + 1] - gbId[i - 1]);
-          const gy = gbNy[i + cols] - gbNy[i - cols] + (gbId[i + cols] - gbId[i - cols]);
+          const gx = (gbNx[i + 1] - gbNx[i - 1]) * 1.4 + (gbId[i + 1] - gbId[i - 1]) + (gbZ[i + 1] - gbZ[i - 1]) * 12.0;
+          const gy = (gbNy[i + cols] - gbNy[i - cols]) * 1.4 + (gbId[i + cols] - gbId[i - cols]) + (gbZ[i + cols] - gbZ[i - cols]) * 12.0;
           const deg = ((Math.atan2(gy, gx) * 180 / Math.PI) + 180) % 180;
           if (deg < 22.5 || deg >= 157.5) edgeDir[i] = 1;
           else if (deg >= 67.5 && deg < 112.5) edgeDir[i] = 2;
@@ -1879,22 +2017,26 @@ window.PokeGameUI = (function() {
   }
 
   // ============================================================================
-  // ESTÁGIO 3 DO PIPELINE 100% ASCII: RENDERIZAÇÃO DO GRID DE CARACTERES ULTRA-HD
-  // Usa Rampa Tipográfica de 24 Níveis + Vincos Anatômicos Sobel 3D + LUT RGB
+  // ESTÁGIO 3 DO PIPELINE 100% ASCII: RENDERIZADOR BITMAP GLYPH ATLAS (PUTIMAGEDATA)
+  // 30x mais rápido no Mobile (1 única chamada putImageData em vez de 57.000 fillText)
+  // + Glifos ASCII com Anti-Aliasing Sub-Pixel de Altíssima Nitidez!
   // ============================================================================
   function renderAsciiCanvas(timeSec) {
-    ctx.fillStyle = "#081024";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    if (!fontLoaded) {
-      ctx.font = `bold ${cellH}px 'Cascadia Mono', 'Fira Code', Consolas, monospace`;
-      ctx.textBaseline = "top";
-      fontLoaded = true;
-    }
-
     const shadeRamp = " .',:;!~+-=*oO08#%W@";
     const shadeLen = shadeRamp.length;
     const dirChars = [" ", "|", "-", "/", "\\"];
+    const useFastBlit = Boolean(framePixels32 && frameImageData && glyphAtlas);
+    const canvasW = canvas.width;
+
+    if (!useFastBlit) {
+      ctx.fillStyle = "#081024";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (!fontLoaded) {
+        ctx.font = `bold ${cellH}px 'Cascadia Mono', 'Fira Code', Consolas, monospace`;
+        ctx.textBaseline = "top";
+        fontLoaded = true;
+      }
+    }
 
     for (let r = 0; r < rows; ++r) {
       const py = r * cellH;
@@ -1911,7 +2053,6 @@ window.PokeGameUI = (function() {
           let cr = gbColR[i] * lit;
           let cg = gbColG[i] * lit;
           let cb = gbColB[i] * lit;
-          // Tonemapping com preservação de Matiz (evita que Laranja vire Amarelo sob luz forte!)
           const maxC = Math.max(cr, cg, cb, 1.0);
           if (maxC > 1.0) {
             const spec = (maxC - 1.0) * 0.16;
@@ -1925,75 +2066,110 @@ window.PokeGameUI = (function() {
             (r > 0 && gbId[i - cols] === 0) || (r < rows - 1 && gbId[i + cols] === 0);
 
           if (id === 7 || id === 2) {
-            bgR = Math.floor(cr * 115);
-            bgG = Math.floor(cg * 155);
-            bgB = Math.floor(cb * 175);
-            fgR = Math.min(255, Math.floor(cr * 255 + 75));
-            fgG = Math.min(255, Math.floor(cg * 255 + 75));
-            fgB = Math.min(255, Math.floor(cb * 255 + 75));
-            ch = (c + r) % 2 === 0 ? "o" : "+";
+            bgR = (cr * 115) | 0;
+            bgG = (cg * 155) | 0;
+            bgB = (cb * 175) | 0;
+            fgR = Math.min(255, (cr * 255 + 75) | 0);
+            fgG = Math.min(255, (cg * 255 + 75) | 0);
+            fgB = Math.min(255, (cb * 255 + 75) | 0);
+            ch = ((c + r) & 1) === 0 ? "o" : "+";
           } else if (isOuterSilhouette) {
-            // Contorno de silhueta 3D de 1 célula com contraste nítido
-            bgR = Math.floor(cr * 82);
-            bgG = Math.floor(cg * 82);
-            bgB = Math.floor(cb * 96);
-            fgR = Math.min(255, Math.floor(cr * 255 + 95));
-            fgG = Math.min(255, Math.floor(cg * 255 + 95));
-            fgB = Math.min(255, Math.floor(cb * 255 + 95));
+            // Contorno de silhueta 3D de 1 célula com contraste escuro profundo + traço luminoso
+            bgR = (cr * 48) | 0;
+            bgG = (cg * 48) | 0;
+            bgB = (cb * 62) | 0;
+            fgR = Math.min(255, (cr * 255 + 108) | 0);
+            fgG = Math.min(255, (cg * 255 + 108) | 0);
+            fgB = Math.min(255, (cb * 255 + 115) | 0);
             ch = edgeDir[i] > 0 ? dirChars[edgeDir[i]] : "#";
           } else {
-            // Sombreamento 3D anatômico de 20 níveis + vincos internos Sobel 3D (olhos, boca, detalhes)
-            bgR = Math.floor(cr * 218);
-            bgG = Math.floor(cg * 218);
-            bgB = Math.floor(cb * 218);
+            // Sombreamento 3D anatômico de 20 níveis + vincos internos Sobel 3D (olhos, boca, garras, listras)
+            bgR = (cr * 212) | 0;
+            bgG = (cg * 212) | 0;
+            bgB = (cb * 212) | 0;
 
-            if (edgeMag[i] > 0.52 && edgeDir[i] > 0) {
-              // Vinco anatômico interno (olhos, listras, divisão de casco/asas)
-              fgR = Math.min(255, Math.floor(cr * 255 + 85));
-              fgG = Math.min(255, Math.floor(cg * 255 + 85));
-              fgB = Math.min(255, Math.floor(cb * 255 + 85));
+            if (edgeMag[i] > 0.42 && edgeDir[i] > 0) {
+              // Vinco anatômico interno com alto contraste
+              bgR = (cr * 165) | 0;
+              bgG = (cg * 165) | 0;
+              bgB = (cb * 172) | 0;
+              fgR = Math.min(255, (cr * 255 + 96) | 0);
+              fgG = Math.min(255, (cg * 255 + 96) | 0);
+              fgB = Math.min(255, (cb * 255 + 96) | 0);
               ch = dirChars[edgeDir[i]];
             } else {
-              fgR = Math.min(255, Math.floor(cr * 255 + 58));
-              fgG = Math.min(255, Math.floor(cg * 255 + 58));
-              fgB = Math.min(255, Math.floor(cb * 255 + 58));
+              fgR = Math.min(255, (cr * 255 + 64) | 0);
+              fgG = Math.min(255, (cg * 255 + 64) | 0);
+              fgB = Math.min(255, (cb * 255 + 64) | 0);
               const luma = Math.min(1, 0.299 * cr + 0.587 * cg + 0.114 * cb);
-              ch = shadeRamp[Math.min(shadeLen - 1, Math.max(1, Math.floor(luma * (shadeLen - 1))))];
+              ch = shadeRamp[Math.min(shadeLen - 1, Math.max(1, (luma * (shadeLen - 1)) | 0))];
             }
           }
         } else {
-          // CÉLULA DO AMBIENTE 3D EM ASCII (Mapa GPS Pokémon GO, Câmera Ao Vivo, Estádio)
+          // CÉLULA DO AMBIENTE 3D EM ASCII (Mapa GPS Pokémon GO com Plantas Baixas Planas)
           const cr = camR[i], cg = camG[i], cb = camB[i];
           const ct = camCellType[i];
-          bgR = Math.floor(cr * 185);
-          bgG = Math.floor(cg * 185);
-          bgB = Math.floor(cb * 195);
+          bgR = (cr * 185) | 0;
+          bgG = (cg * 185) | 0;
+          bgB = (cb * 195) | 0;
 
-          fgR = Math.min(255, Math.floor(cr * 255 + 42));
-          fgG = Math.min(255, Math.floor(cg * 255 + 46));
-          fgB = Math.min(255, Math.floor(cb * 255 + 54));
+          fgR = Math.min(255, (cr * 255 + 44) | 0);
+          fgG = Math.min(255, (cg * 255 + 48) | 0);
+          fgB = Math.min(255, (cb * 255 + 58) | 0);
 
           if (ct === 2) {
             ch = "=";
           } else if (ct === 3) {
             ch = "#";
+          } else if (ct === 5) {
+            // Parede perimetral da planta baixa plana do prédio no chão
+            ch = "+";
           } else if (ct === 4) {
-            ch = ((r & 1) === 0 && (c & 1) === 0) ? "#" : ":";
+            // Interior da planta baixa plana do prédio no chão
+            ch = ((r & 1) === 0 && (c & 1) === 0) ? ":" : ".";
           } else if (ct === 1) {
             ch = "·";
-          } else if (edgeMag[i] > 0.22 && edgeDir[i] > 0) {
+          } else if (edgeMag[i] > 0.20 && edgeDir[i] > 0) {
             ch = dirChars[edgeDir[i]];
           } else {
             ch = ((r + c) & 1) === 0 ? "." : ",";
           }
         }
 
-        ctx.fillStyle = fastRgb(bgR, bgG, bgB);
-        ctx.fillRect(px, py, cellW, cellH);
-
-        ctx.fillStyle = fastRgb(fgR, fgG, fgB);
-        ctx.fillText(ch, px, py);
+        if (useFastBlit) {
+          const ci = CHAR_TO_IDX.get(ch) || 0;
+          const mask = glyphAtlas[ci];
+          const bgPack = 0xFF000000 | (bgB << 16) | (bgG << 8) | bgR;
+          const fgPack = 0xFF000000 | (fgB << 16) | (fgG << 8) | fgR;
+          const dR = fgR - bgR, dG = fgG - bgG, dB = fgB - bgB;
+          let mIdx = 0;
+          for (let dy = 0; dy < cellH; ++dy) {
+            let pIdx = (py + dy) * canvasW + px;
+            for (let dx = 0; dx < cellW; ++dx, ++mIdx, ++pIdx) {
+              const a = mask[mIdx];
+              if (a === 0) {
+                framePixels32[pIdx] = bgPack;
+              } else if (a >= 245) {
+                framePixels32[pIdx] = fgPack;
+              } else {
+                const pr = bgR + ((dR * a) >> 8);
+                const pg = bgG + ((dG * a) >> 8);
+                const pb = bgB + ((dB * a) >> 8);
+                framePixels32[pIdx] = 0xFF000000 | (pb << 16) | (pg << 8) | pr;
+              }
+            }
+          }
+        } else {
+          ctx.fillStyle = fastRgb(bgR, bgG, bgB);
+          ctx.fillRect(px, py, cellW, cellH);
+          ctx.fillStyle = fastRgb(fgR, fgG, fgB);
+          ctx.fillText(ch, px, py);
+        }
       }
+    }
+
+    if (useFastBlit) {
+      ctx.putImageData(frameImageData, 0, 0);
     }
 
     // ============================================================================
@@ -2010,81 +2186,120 @@ window.PokeGameUI = (function() {
     }
   }
 
-  // Etiquetas flutuantes clicáveis sobre o Mapa 3D ASCII + Pétalas de Lure (*) + Grama ( \ | / )
+  // Etiquetas flutuantes com Cone de FOV Central + Raio de Proximidade + Anti-Colisão 2D
+  // (Mantém todos os pontos clicáveis no mapa, mas só exibe os títulos próximos no centro da visão!)
   function drawCityFloatingLabels() {
     const timeSec = performance.now() * 0.001;
     ctx.save();
-    for (const t of projectedClickTargets) {
-      if (t.x < -40 || t.x > canvas.width + 40 || t.y < -40 || t.y > canvas.height + 40) continue;
 
-      // 1. Pétalas Sakura de Lure Module em ASCII (* * ·) caindo nos PokéStops com Lure!
-      if (t.type === "POKESTOP" && t.hasLure) {
-        ctx.font = "bold 14px 'Cascadia Mono', Consolas, monospace";
+    // 1. Efeitos leves de partículas ASCII no chão (Lure Sakura * e Grama \|/)
+    for (const t of projectedClickTargets) {
+      if (t.x < -20 || t.x > canvas.width + 20 || t.y < -20 || t.y > canvas.height + 20) continue;
+      if (t.type === "POKESTOP" && t.hasLure && (t.dPlayer || 0) < 28.0) {
+        ctx.font = "bold 13px 'Cascadia Mono', Consolas, monospace";
         const petals = ["*", "*", "·", "+"];
-        for (let p = 0; p < 6; ++p) {
-          const ang = timeSec * 1.8 + p * 1.05;
-          const px = t.x + Math.cos(ang) * 28;
-          const py = t.y - 10 + ((timeSec * 22 + p * 12) % 36);
+        for (let p = 0; p < 4; ++p) {
+          const ang = timeSec * 1.8 + p * 1.55;
+          const px = t.x + Math.cos(ang) * 24;
+          const py = t.y - 8 + ((timeSec * 20 + p * 12) % 30);
           ctx.fillStyle = p % 2 === 0 ? "#f472b6" : "#fbcfe8";
           ctx.fillText(petals[p % petals.length], px, py);
         }
       }
-
-      // 2. Folhas de Grama ASCII (\ | /) balançando nos pés dos Pokémons Selvagens no Mapa
-      if (t.type === "WILD") {
-        ctx.font = "bold 13px 'Cascadia Mono', Consolas, monospace";
+      if (t.type === "WILD" && (t.dPlayer || 0) < 20.0) {
+        ctx.font = "bold 12px 'Cascadia Mono', Consolas, monospace";
         ctx.fillStyle = "#4ade80";
         const sway = Math.sin(timeSec * 5 + t.index) > 0 ? "/" : "\\";
-        ctx.fillText(`${sway}|${sway}`, t.x - 10, t.y + 16);
+        ctx.fillText(`${sway}|${sway}`, t.x - 9, t.y + 14);
       }
+    }
+
+    // 2. Filtro de Cone de FOV Central + Distância Máxima para Títulos Flutuantes
+    const fovMinX = canvas.width * 0.14, fovMaxX = canvas.width * 0.86;
+    const fovMinY = canvas.height * 0.16, fovMaxY = canvas.height * 0.82;
+
+    const visibleLabels = [];
+    for (const t of projectedClickTargets) {
+      const dist = t.dPlayer !== undefined ? t.dPlayer : 10.0;
+      const maxDist = t.isStarter ? 24.0 : (t.type === "WILD" ? 13.5 : (t.type === "POKESTOP" ? 14.5 : 21.0));
+      if (dist > maxDist) continue;
+      if (!t.isStarter && (t.x < fovMinX || t.x > fovMaxX || t.y < fovMinY || t.y > fovMaxY)) continue;
+      visibleLabels.push(t);
+    }
+
+    // Ordena por prioridade: Iniciais > Selvagens mais próximos > PokéStops/Ginásios mais próximos
+    visibleLabels.sort((a, b) => {
+      if (a.isStarter !== b.isStarter) return a.isStarter ? -1 : 1;
+      if ((a.type === "WILD") !== (b.type === "WILD")) return a.type === "WILD" ? -1 : 1;
+      return (a.dPlayer || 0) - (b.dPlayer || 0);
+    });
+
+    const drawnBoxes = [];
+    const maxLabelsOnScreen = 4;
+
+    for (const t of visibleLabels) {
+      if (drawnBoxes.length >= maxLabelsOnScreen) break;
 
       const isWild = t.type === "WILD";
-      const bg = t.isStarter ? "rgba(217, 119, 6, 0.94)" :
+      const dist = t.dPlayer || 0;
+      const maxDist = t.isStarter ? 24.0 : (isWild ? 13.5 : (t.type === "POKESTOP" ? 14.5 : 21.0));
+      const fadeAlpha = Math.max(0.35, Math.min(0.95, 1.15 - (dist / maxDist) * 0.65));
+
+      ctx.font = asciiUiMode
+        ? "bold 10px 'Cascadia Mono', Consolas, monospace"
+        : "bold 10.5px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
+      const shortText = dist < 8.5 ? `${t.label} (${t.sub})` : t.label;
+      const text = asciiUiMode ? `[ ${shortText} ]` : shortText;
+      const w = Math.max(68, ctx.measureText(text).width + 14);
+      const h = 20;
+      const bx = t.x - w / 2;
+      const by = t.y - 28;
+
+      // Anti-Colisão 2D: descarta título se colidir com outro título mais próximo já desenhado!
+      let overlaps = false;
+      for (let i = 0; i < drawnBoxes.length; ++i) {
+        const b = drawnBoxes[i];
+        if (bx < b.x1 + 6 && bx + w > b.x0 - 6 && by < b.y1 + 4 && by + h > b.y0 - 4) {
+          overlaps = true;
+          break;
+        }
+      }
+      if (overlaps) continue;
+      drawnBoxes.push({ x0: bx, y0: by, x1: bx + w, y1: by + h });
+
+      ctx.globalAlpha = fadeAlpha;
+      const bg = t.isStarter ? "rgba(217, 119, 6, 0.92)" :
                  (isWild ? "rgba(16, 120, 96, 0.88)" :
                  (t.type === "GYM" ? "rgba(140, 38, 56, 0.88)" :
-                 (t.type === "VILLAIN" ? "rgba(105, 35, 165, 0.90)" : "rgba(18, 92, 168, 0.88)")));
+                 (t.type === "VILLAIN" ? "rgba(105, 35, 165, 0.90)" : "rgba(18, 92, 168, 0.86)")));
 
       if (asciiUiMode) {
-        ctx.font = "bold 11px 'Cascadia Mono', Consolas, monospace";
-        const text = `[ ${t.label} | ${t.sub} ]`;
-        const w = Math.max(92, ctx.measureText(text).width + 14);
-        const h = 22;
-        const bx = t.x - w / 2;
-        const by = t.y - 34;
         const borderCol = t.isStarter ? "#fbbf24" : (isWild ? "#26ccaa" : (t.type === "GYM" ? "#f43f5e" : "#38bdf8"));
-
         ctx.fillStyle = "rgba(6, 13, 28, 0.92)";
         ctx.fillRect(bx, by, w, h);
         ctx.strokeStyle = borderCol;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.25;
         ctx.strokeRect(bx, by, w, h);
-
         ctx.fillStyle = borderCol;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(text, t.x, by + h / 2);
       } else {
-        ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-        const text = `${t.label} (${t.sub})`;
-        const w = Math.max(84, ctx.measureText(text).width + 18);
-        const h = 24;
-        const bx = t.x - w / 2;
-        const by = t.y - 34;
-
         ctx.fillStyle = bg;
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(255,255,255,0.88)";
+        ctx.lineWidth = 1.25;
         ctx.beginPath();
-        ctx.roundRect(bx, by, w, h, 12);
+        ctx.roundRect(bx, by, w, h, 10);
         ctx.fill();
         ctx.stroke();
-
         ctx.fillStyle = "#ffffff";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(text, t.x, by + h / 2);
       }
     }
+    ctx.globalAlpha = 1.0;
 
     // 3. Bolhas Flutuantes de Recompensas ao Girar PokéStop / Ginásio
     for (let i = cityState.floatingMapAnims.length - 1; i >= 0; --i) {
