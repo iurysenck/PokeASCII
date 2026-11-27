@@ -106,6 +106,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
 
   const MESH_CACHE = new Map();
   const SPRITE_LOADING = new Set();
+  const GLB_LOADING = new Set();
   const ASCII_PORTRAIT_CACHE = new Map();
 
   function createMesh() { return { verts: [], indices: [] }; }
@@ -382,12 +383,358 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
         const imgData = cx.getImageData(0, 0, gridW, gridH).data;
         const volMesh = buildVolumetricMeshFromPixelGrid(gridW, gridH, imgData, 1.72, 1.82, 0.68);
         if (volMesh.verts.length > 40) {
-          MESH_CACHE.set(key, volMesh);
-          ASCII_PORTRAIT_CACHE.delete(`${key}_0`);
-          ASCII_PORTRAIT_CACHE.delete(`${key}_1`);
+          const existing = MESH_CACHE.get(key);
+          if (!existing || !existing.isReal3DGlb) {
+            MESH_CACHE.set(key, volMesh);
+            ASCII_PORTRAIT_CACHE.delete(`${key}_0`);
+            ASCII_PORTRAIT_CACHE.delete(`${key}_1`);
+          }
         }
       } catch (_) {}
     };
+  }
+
+  // ============================================================================
+  // CARREGADOR E PARSER BINÁRIO DE MODELOS 3D REAIS (.GLB / glTF 2.0)
+  // Extrai milhares de triângulos 3D reais, normais, coordenadas UV e texturas
+  // PNG embutidas diretamente para o G-Buffer 100% ASCII!
+  // ============================================================================
+  async function decodeGlbImageToTextureBuffer(pngBytes, mimeType) {
+    const texW = 128, texH = 128;
+    const blob = new Blob([pngBytes], { type: mimeType || "image/png" });
+    let c = document.createElement("canvas");
+    c.width = texW;
+    c.height = texH;
+    const cx = c.getContext("2d");
+
+    if (typeof createImageBitmap === "function") {
+      const bmp = await createImageBitmap(blob);
+      cx.drawImage(bmp, 0, 0, texW, texH);
+      if (bmp.close) bmp.close();
+    } else {
+      await new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(blob);
+        img.onload = () => {
+          cx.drawImage(img, 0, 0, texW, texH);
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        img.onerror = (e) => {
+          URL.revokeObjectURL(url);
+          reject(e);
+        };
+        img.src = url;
+      });
+    }
+
+    const rgba = cx.getImageData(0, 0, texW, texH).data;
+    const luma = new Float32Array(texW * texH);
+    for (let i = 0; i < texW * texH; ++i) {
+      const r = rgba[i * 4 + 0] / 255;
+      const g = rgba[i * 4 + 1] / 255;
+      const b = rgba[i * 4 + 2] / 255;
+      luma[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+    return { width: texW, height: texH, rgba, luma };
+  }
+
+  function sampleGlbTexture(tex, u, v) {
+    if (!tex || !tex.rgba) return null;
+    let wu = u - Math.floor(u);
+    let wv = v - Math.floor(v);
+    if (wu < 0) wu += 1;
+    if (wv < 0) wv += 1;
+    const tx = Math.min(tex.width - 1, Math.max(0, Math.floor(wu * tex.width)));
+    const ty = Math.min(tex.height - 1, Math.max(0, Math.floor(wv * tex.height)));
+    const idx = ty * tex.width + tx;
+    const p = idx * 4;
+
+    const txL = tx > 0 ? tx - 1 : tx;
+    const txR = tx + 1 < tex.width ? tx + 1 : tx;
+    const tyU = ty > 0 ? ty - 1 : ty;
+    const tyD = ty + 1 < tex.height ? ty + 1 : ty;
+    const dU = tex.luma[ty * tex.width + txR] - tex.luma[ty * tex.width + txL];
+    const dV = tex.luma[tyD * tex.width + tx] - tex.luma[tyU * tex.width + tx];
+
+    return {
+      r: tex.rgba[p] / 255,
+      g: tex.rgba[p + 1] / 255,
+      b: tex.rgba[p + 2] / 255,
+      dU,
+      dV
+    };
+  }
+
+  async function parseAndBuildReal3DGlbMesh(arrayBuffer, isShiny) {
+    const dv = new DataView(arrayBuffer);
+    if (arrayBuffer.byteLength < 28) return null;
+    const magic = dv.getUint32(0, true);
+    if (magic !== 0x46546C67) return null; // "glTF"
+
+    const chunk0Len = dv.getUint32(12, true);
+    const chunk0Type = dv.getUint32(16, true);
+    if (chunk0Type !== 0x4E4F534A) return null; // "JSON"
+
+    const jsonBytes = new Uint8Array(arrayBuffer, 20, chunk0Len);
+    const gltf = JSON.parse(new TextDecoder("utf-8").decode(jsonBytes));
+    const binStart = 20 + chunk0Len + 8;
+
+    function getTypedAccessor(accIdx) {
+      if (accIdx === undefined || accIdx === null) return null;
+      const acc = gltf.accessors[accIdx];
+      if (!acc || acc.bufferView === undefined) return null;
+      const bv = gltf.bufferViews[acc.bufferView];
+      const byteOffset = binStart + (bv.byteOffset || 0) + (acc.byteOffset || 0);
+      const numComp = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 }[acc.type] || 1;
+      const stride = bv.byteStride || 0;
+      const count = acc.count;
+
+      const compBytes = acc.componentType === 5126 ? 4 : (acc.componentType === 5125 ? 4 : (acc.componentType === 5123 ? 2 : 1));
+      if (stride && stride !== numComp * compBytes) {
+        const out = new Float32Array(count * numComp);
+        for (let i = 0; i < count; ++i) {
+          const base = byteOffset + i * stride;
+          for (let c = 0; c < numComp; ++c) {
+            if (acc.componentType === 5126) out[i * numComp + c] = dv.getFloat32(base + c * 4, true);
+            else if (acc.componentType === 5123) out[i * numComp + c] = dv.getUint16(base + c * 2, true);
+            else if (acc.componentType === 5125) out[i * numComp + c] = dv.getUint32(base + c * 4, true);
+            else if (acc.componentType === 5121) out[i * numComp + c] = dv.getUint8(base + c);
+          }
+        }
+        return { data: out, count, numComp };
+      }
+
+      const total = count * numComp;
+      let arr = null;
+      if (acc.componentType === 5126) arr = new Float32Array(arrayBuffer, byteOffset, total);
+      else if (acc.componentType === 5123) arr = new Uint16Array(arrayBuffer, byteOffset, total);
+      else if (acc.componentType === 5125) arr = new Uint32Array(arrayBuffer, byteOffset, total);
+      else if (acc.componentType === 5121) arr = new Uint8Array(arrayBuffer, byteOffset, total);
+      return arr ? { data: arr, count, numComp } : null;
+    }
+
+    const textures = [];
+    if (Array.isArray(gltf.images)) {
+      for (let i = 0; i < gltf.images.length; ++i) {
+        try {
+          const img = gltf.images[i];
+          if (img && img.bufferView !== undefined) {
+            const bv = gltf.bufferViews[img.bufferView];
+            const bytes = new Uint8Array(arrayBuffer, binStart + (bv.byteOffset || 0), bv.byteLength);
+            const texBuf = await decodeGlbImageToTextureBuffer(bytes, img.mimeType || "image/png");
+            textures.push(texBuf);
+          } else {
+            textures.push(null);
+          }
+        } catch (_) {
+          textures.push(null);
+        }
+      }
+    }
+
+    const rawVerts = [];
+    const rawIndices = [];
+    const eyeCheckIndices = [];
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+
+    for (const mesh of (gltf.meshes || [])) {
+      const mName = mesh.name || "";
+      if (/vine|effect|shadow|plane|aura/i.test(mName)) continue;
+
+      for (const prim of (mesh.primitives || [])) {
+        if (prim.mode !== undefined && prim.mode !== 4) continue;
+        const posAcc = getTypedAccessor(prim.attributes && prim.attributes.POSITION);
+        if (!posAcc) continue;
+        const normAcc = getTypedAccessor(prim.attributes && prim.attributes.NORMAL);
+        const uvAcc = getTypedAccessor(prim.attributes && prim.attributes.TEXCOORD_0);
+        const colAcc = getTypedAccessor(prim.attributes && prim.attributes.COLOR_0);
+        const idxAcc = getTypedAccessor(prim.indices);
+
+        let texIdx = -1;
+        let baseFactor = [1, 1, 1];
+        let matName = mName;
+        if (prim.material !== undefined && gltf.materials && gltf.materials[prim.material]) {
+          const mat = gltf.materials[prim.material];
+          matName += " " + (mat.name || "");
+          if (/effect|shadow|plane|aura/i.test(matName)) continue;
+          const pbr = mat.pbrMetallicRoughness || {};
+          if (Array.isArray(pbr.baseColorFactor)) {
+            baseFactor = [pbr.baseColorFactor[0], pbr.baseColorFactor[1], pbr.baseColorFactor[2]];
+          }
+          const texInfo = pbr.baseColorTexture || mat.emissiveTexture;
+          if (texInfo && gltf.textures && gltf.textures[texInfo.index]) {
+            const srcIdx = gltf.textures[texInfo.index].source;
+            if (srcIdx !== undefined && textures[srcIdx]) texIdx = srcIdx;
+          }
+        }
+        const isEyeOrFace = /eye|iris|pupil|mouth|face/i.test(matName);
+
+        const baseVertex = rawVerts.length;
+        const pData = posAcc.data;
+        const nData = normAcc ? normAcc.data : null;
+        const uData = uvAcc ? uvAcc.data : null;
+        const cData = colAcc ? colAcc.data : null;
+        const cComp = colAcc ? colAcc.numComp : 3;
+
+        for (let i = 0; i < posAcc.count; ++i) {
+          const px = pData[i * 3 + 0];
+          const py = pData[i * 3 + 1];
+          const pz = pData[i * 3 + 2];
+          if (px < minX) minX = px; if (px > maxX) maxX = px;
+          if (py < minY) minY = py; if (py > maxY) maxY = py;
+          if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
+
+          const nx = nData ? nData[i * 3 + 0] : 0;
+          const ny = nData ? nData[i * 3 + 1] : 1;
+          const nz = nData ? nData[i * 3 + 2] : 0;
+          const u = uData ? uData[i * 2 + 0] : 0;
+          const v = uData ? uData[i * 2 + 1] : 0;
+
+          let cr = baseFactor[0], cg = baseFactor[1], cb = baseFactor[2];
+          if (texIdx >= 0 && textures[texIdx]) {
+            const s = sampleGlbTexture(textures[texIdx], u, v);
+            if (s) {
+              cr *= s.r;
+              cg *= s.g;
+              cb *= s.b;
+            }
+          } else if (cData) {
+            cr *= cData[i * cComp + 0];
+            cg *= cData[i * cComp + 1];
+            cb *= cData[i * cComp + 2];
+          }
+
+          if (isEyeOrFace) eyeCheckIndices.push(rawVerts.length);
+          rawVerts.push({
+            pos: { x: px, y: py, z: pz },
+            norm: { x: nx, y: ny, z: nz },
+            u,
+            v,
+            texIdx,
+            col: { x: cr, y: cg, z: cb }
+          });
+        }
+
+        if (idxAcc) {
+          const iData = idxAcc.data;
+          for (let i = 0; i + 2 < idxAcc.count; i += 3) {
+            rawIndices.push(baseVertex + iData[i], baseVertex + iData[i + 1], baseVertex + iData[i + 2]);
+          }
+        } else {
+          for (let i = 0; i + 2 < posAcc.count; i += 3) {
+            rawIndices.push(baseVertex + i, baseVertex + i + 1, baseVertex + i + 2);
+          }
+        }
+      }
+    }
+
+    if (rawVerts.length < 12 || rawIndices.length < 12) return null;
+
+    // Detecção Automática de Eixo Vertical (Y_UP vs Z_UP vs X_UP) por Simetria Bilateral + Plano dos Pés
+    const spanX = Math.max(1e-4, maxX - minX);
+    const spanY = Math.max(1e-4, maxY - minY);
+    const spanZ = Math.max(1e-4, maxZ - minZ);
+    const symX = Math.abs(minX + maxX) / spanX;
+    let axisMode = "Y_UP";
+    if (symX > 0.35) {
+      axisMode = "X_UP";
+    } else if ((minZ / spanZ) > (minY / spanY) + 0.12) {
+      axisMode = "Z_UP";
+    }
+
+    let wMinX = Infinity, wMaxX = -Infinity;
+    let wMinY = Infinity, wMaxY = -Infinity;
+    let wMinZ = Infinity, wMaxZ = -Infinity;
+
+    for (let i = 0; i < rawVerts.length; ++i) {
+      const rv = rawVerts[i];
+      const lx = rv.pos.x, ly = rv.pos.y, lz = rv.pos.z;
+      const lnx = rv.norm.x, lny = rv.norm.y, lnz = rv.norm.z;
+      let wx = lx, wy = ly, wz = lz;
+      let nx = lnx, ny = lny, nz = lnz;
+
+      if (axisMode === "X_UP") {
+        wx = ly;  wy = lx;  wz = lz;
+        nx = lny; ny = lnx; nz = lnz;
+      } else if (axisMode === "Z_UP") {
+        wx = lx;  wy = lz;  wz = -ly;
+        nx = lnx; ny = lnz; nz = -lny;
+      }
+
+      rv.pos.x = wx; rv.pos.y = wy; rv.pos.z = wz;
+      rv.norm = norm3({ x: nx, y: ny, z: nz });
+      if (wx < wMinX) wMinX = wx; if (wx > wMaxX) wMaxX = wx;
+      if (wy < wMinY) wMinY = wy; if (wy > wMaxY) wMaxY = wy;
+      if (wz < wMinZ) wMinZ = wz; if (wz > wMaxZ) wMaxZ = wz;
+    }
+
+    const wSpanX = Math.max(1e-4, wMaxX - wMinX);
+    const wSpanY = Math.max(1e-4, wMaxY - wMinY);
+    const wSpanZ = Math.max(1e-4, wMaxZ - wMinZ);
+    const normScale = 1.78 / Math.max(wSpanX * 0.92, wSpanY, wSpanZ * 0.82);
+    const cx = (wMinX + wMaxX) * 0.5;
+    const cz = (wMinZ + wMaxZ) * 0.5;
+
+    for (let i = 0; i < rawVerts.length; ++i) {
+      const rv = rawVerts[i];
+      rv.pos.x = (rv.pos.x - cx) * normScale;
+      rv.pos.y = (rv.pos.y - wMinY) * normScale;
+      rv.pos.z = (rv.pos.z - cz) * normScale;
+      rv.uv = Math.max(0, Math.min(1, rv.pos.y / 1.78));
+    }
+
+    // Garante que o rosto/olhos do modelo 3D apontem sempre para +Z (em direção à câmera/jogador)
+    if (eyeCheckIndices.length > 0) {
+      let avgEyeZ = 0;
+      for (let i = 0; i < eyeCheckIndices.length; ++i) {
+        avgEyeZ += rawVerts[eyeCheckIndices[i]].pos.z;
+      }
+      avgEyeZ /= eyeCheckIndices.length;
+      if (avgEyeZ < -0.02) {
+        for (let i = 0; i < rawVerts.length; ++i) {
+          rawVerts[i].pos.z = -rawVerts[i].pos.z;
+          rawVerts[i].pos.x = -rawVerts[i].pos.x;
+          rawVerts[i].norm.z = -rawVerts[i].norm.z;
+          rawVerts[i].norm.x = -rawVerts[i].norm.x;
+        }
+      }
+    }
+
+    return {
+      verts: rawVerts,
+      indices: rawIndices,
+      textures,
+      isReal3DGlb: true
+    };
+  }
+
+  function fetchAndUpgradeReal3DGlbPokemonMesh(speciesId, isShiny) {
+    const key = `${speciesId}_${isShiny ? 1 : 0}`;
+    if (GLB_LOADING.has(key)) return;
+    GLB_LOADING.add(key);
+
+    const folder = isShiny ? "shiny" : "regular";
+    const primaryUrl = `https://raw.githubusercontent.com/Sudhanshu-Ambastha/Pokemon-3D/main/models/glb/${folder}/${speciesId}.glb`;
+    const fallbackUrl = `https://raw.githubusercontent.com/Sudhanshu-Ambastha/Pokemon-3D/main/models/glb/regular/${speciesId}.glb`;
+
+    fetch(primaryUrl)
+      .then((res) => {
+        if (!res.ok && isShiny) return fetch(fallbackUrl);
+        return res;
+      })
+      .then((res) => (res && res.ok ? res.arrayBuffer() : null))
+      .then((buf) => (buf ? parseAndBuildReal3DGlbMesh(buf, isShiny) : null))
+      .then((glbMesh) => {
+        if (glbMesh && glbMesh.verts.length > 20) {
+          MESH_CACHE.set(key, glbMesh);
+          ASCII_PORTRAIT_CACHE.delete(`${key}_0`);
+          ASCII_PORTRAIT_CACHE.delete(`${key}_1`);
+        }
+      })
+      .catch(() => {});
   }
 
   function appendEyes3D(m, headY, headZ, spreadX, eyeSize, eyeCol) {
@@ -413,6 +760,9 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     const key = `${speciesId}_${isShiny ? 1 : 0}`;
     if (MESH_CACHE.has(key)) return MESH_CACHE.get(key);
 
+    // 1. Dispara carregamento do Modelo 3D Real (.GLB com milhares de triângulos + texturas UV)
+    fetchAndUpgradeReal3DGlbPokemonMesh(speciesId, isShiny);
+    // 2. Dispara fallback rápido de Relevo Volumétrico 3D 52x52 de 6 faces
     fetchAndUpgradeVolumetricPokemonMesh(speciesId, isShiny);
 
     const sp = window.PokeData.getSpecies(speciesId);
@@ -820,15 +1170,33 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
           pZ[idx] = z;
           pHit[idx] = 1;
 
-          const nx = v0.norm.x*w0 + v1.norm.x*w1 + v2.norm.x*w2;
-          const ny = v0.norm.y*w0 + v1.norm.y*w1 + v2.norm.y*w2;
+          let nx = v0.norm.x*w0 + v1.norm.x*w1 + v2.norm.x*w2;
+          let ny = v0.norm.y*w0 + v1.norm.y*w1 + v2.norm.y*w2;
           const nz = v0.norm.z*w0 + v1.norm.z*w1 + v2.norm.z*w2;
-          pNx[idx] = nx; pNy[idx] = ny;
-          const lit = Math.min(1.38, 0.42 + 0.72 * Math.max(0, nx*lightDir.x + ny*lightDir.y + nz*lightDir.z));
 
-          pR[idx] = Math.min(1, (v0.col.x*w0 + v1.col.x*w1 + v2.col.x*w2) * lit);
-          pG[idx] = Math.min(1, (v0.col.y*w0 + v1.col.y*w1 + v2.col.y*w2) * lit);
-          pB[idx] = Math.min(1, (v0.col.z*w0 + v1.col.z*w1 + v2.col.z*w2) * lit);
+          let cr = v0.col.x*w0 + v1.col.x*w1 + v2.col.x*w2;
+          let cg = v0.col.y*w0 + v1.col.y*w1 + v2.col.y*w2;
+          let cb = v0.col.z*w0 + v1.col.z*w1 + v2.col.z*w2;
+
+          if (mesh.textures && v0.texIdx !== undefined && v0.texIdx >= 0 && mesh.textures[v0.texIdx]) {
+            const tu = v0.u*w0 + v1.u*w1 + v2.u*w2;
+            const tv = v0.v*w0 + v1.v*w1 + v2.v*w2;
+            const s = sampleGlbTexture(mesh.textures[v0.texIdx], tu, tv);
+            if (s) {
+              cr = s.r;
+              cg = s.g;
+              cb = s.b;
+              nx += s.dU * 2.2;
+              ny += s.dV * 2.2;
+            }
+          }
+
+          pNx[idx] = nx; pNy[idx] = ny;
+          const lit = Math.min(1.42, 0.44 + 0.74 * Math.max(0, nx*lightDir.x + ny*lightDir.y + nz*lightDir.z));
+
+          pR[idx] = Math.min(1, cr * lit);
+          pG[idx] = Math.min(1, cg * lit);
+          pB[idx] = Math.min(1, cb * lit);
         }
       }
     }
@@ -944,6 +1312,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     mat4View6DoF, mat4LookAtBasis, mat4Perspective, projectPoint3D,
     computeVisualScale,
     getPokemonMesh,
+    sampleGlbTexture,
     buildPokeballMesh,
     buildAnchorRingMesh,
     buildTrainerAvatarMesh,

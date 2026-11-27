@@ -1709,6 +1709,15 @@ window.PokeGameUI = (function() {
         const maxX = Math.min(cols - 1, Math.ceil(Math.max(sx[0], sx[1], sx[2])));
         const minY = Math.max(0, Math.floor(Math.min(sy[0], sy[1], sy[2])));
         const maxY = Math.min(rows - 1, Math.ceil(Math.max(sy[0], sy[1], sy[2])));
+        if (minX > maxX || minY > maxY) continue;
+
+        const hasGlbTex = Boolean(
+          cmd.mesh.textures &&
+          v0.texIdx !== undefined &&
+          v0.texIdx >= 0 &&
+          cmd.mesh.textures[v0.texIdx]
+        );
+        const activeTex = hasGlbTex ? cmd.mesh.textures[v0.texIdx] : null;
 
         for (let py = minY; py <= maxY; ++py) {
           for (let px = minX; px <= maxX; ++px) {
@@ -1725,14 +1734,36 @@ window.PokeGameUI = (function() {
             gbZ[idx] = z;
             gbId[idx] = cmd.id;
 
-            const nx = wn[0].x * w0 + wn[1].x * w1 + wn[2].x * w2;
-            const ny = wn[0].y * w0 + wn[1].y * w1 + wn[2].y * w2;
+            let nx = wn[0].x * w0 + wn[1].x * w1 + wn[2].x * w2;
+            let ny = wn[0].y * w0 + wn[1].y * w1 + wn[2].y * w2;
             const nz = wn[0].z * w0 + wn[1].z * w1 + wn[2].z * w2;
+
+            let texR = v0.col.x * w0 + v1.col.x * w1 + v2.col.x * w2;
+            let texG = v0.col.y * w0 + v1.col.y * w1 + v2.col.y * w2;
+            let texB = v0.col.z * w0 + v1.col.z * w1 + v2.col.z * w2;
+
+            if (activeTex && E.sampleGlbTexture) {
+              const tu = v0.u * w0 + v1.u * w1 + v2.u * w2;
+              const tv = v0.v * w0 + v1.v * w1 + v2.v * w2;
+              const s = E.sampleGlbTexture(activeTex, tu, tv);
+              if (s) {
+                texR = s.r;
+                texG = s.g;
+                texB = s.b;
+                // Injeta micro-relevo da textura UV nas normais 3D do G-Buffer para que olhos,
+                // pupilas, boca, dentes e listras do modelo .GLB gerem vincos ASCII ultra-nitidos!
+                nx += s.dU * 2.35;
+                ny += s.dV * 2.35;
+              }
+            }
+
             gbNx[idx] = nx; gbNy[idx] = ny; gbNz[idx] = nz;
 
             const ndotl = Math.max(0, nx * lightDir.x + ny * lightDir.y + nz * lightDir.z);
-            const rim = Math.pow(1.0 - Math.min(1, Math.abs(nz)), 2.0) * 0.45;
-            gbLight[idx] = Math.min(1.45, 0.35 + 0.72 * ndotl + rim);
+            const hemi = 0.30 + 0.14 * (0.5 + 0.5 * ny);
+            const rim = Math.pow(1.0 - Math.min(1, Math.abs(nz)), 2.1) * 0.46;
+            const spec = Math.pow(Math.max(0, ndotl), 10.0) * 0.18;
+            gbLight[idx] = Math.min(1.52, hemi + 0.74 * ndotl + rim + spec);
 
             if (cmd.tintRedLaser) {
               // Tinta de Energia Vermelha/Laser quando o Pokémon está entrando/saindo da Pokébola
@@ -1746,9 +1777,9 @@ window.PokeGameUI = (function() {
               gbColB[idx] = 1.0;
               gbLight[idx] = 1.35;
             } else {
-              gbColR[idx] = v0.col.x * w0 + v1.col.x * w1 + v2.col.x * w2;
-              gbColG[idx] = v0.col.y * w0 + v1.col.y * w1 + v2.col.y * w2;
-              gbColB[idx] = v0.col.z * w0 + v1.col.z * w1 + v2.col.z * w2;
+              gbColR[idx] = texR;
+              gbColG[idx] = texG;
+              gbColB[idx] = texB;
             }
           }
         }
