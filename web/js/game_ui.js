@@ -866,21 +866,41 @@ window.PokeGameUI = (function() {
     banner.style.display = "flex";
   }
 
+  let transitionTimer1 = null;
+  let transitionTimer2 = null;
+
+  function syncSceneHudVisibility() {
+    const mapHud = document.getElementById("map-overworld-hud");
+    const arHud = document.getElementById("ar-encounter-hud");
+    const battleHud = document.getElementById("live-battle-hud");
+    if (mapHud) mapHud.style.display = gameScene === "CITY_MAP" ? "block" : "none";
+    if (arHud) arHud.style.display = gameScene === "AR_CAPTURE" ? "block" : "none";
+    if (battleHud) battleHud.style.display = gameScene === "LIVE_BATTLE" ? "block" : "none";
+  }
+
   function triggerSceneTransition(label, onMidpoint) {
     const overlay = document.getElementById("scene-transition-overlay");
     if (window.PokeAudio.playTransitionShutter) window.PokeAudio.playTransitionShutter();
+    if (transitionTimer1) { clearTimeout(transitionTimer1); transitionTimer1 = null; }
+    if (transitionTimer2) { clearTimeout(transitionTimer2); transitionTimer2 = null; }
+
     if (!overlay) {
       if (onMidpoint) onMidpoint();
       return;
     }
     overlay.textContent = label || "";
     overlay.classList.add("active");
-    setTimeout(() => {
-      if (onMidpoint) onMidpoint();
-      setTimeout(() => {
-        overlay.classList.remove("active");
-      }, 220);
-    }, 180);
+    transitionTimer1 = setTimeout(() => {
+      transitionTimer1 = null;
+      try {
+        if (onMidpoint) onMidpoint();
+      } finally {
+        transitionTimer2 = setTimeout(() => {
+          transitionTimer2 = null;
+          overlay.classList.remove("active");
+        }, 180);
+      }
+    }, 110);
   }
 
   // ============================================================================
@@ -939,23 +959,28 @@ window.PokeGameUI = (function() {
       EVOLUTION_CUTSCENE: "[EVO] EVOLUÇÃO MORPH 3D"
     };
 
+    // Atualiza o estado da cena e os HUDs IMEDIATAMENTE (evita travamentos ou cliques duplos durante a transição!)
+    if (nextScene === "CITY_MAP") {
+      liveBattle.active = false;
+      evoScene.active = false;
+      ball.isDraggingBall = false;
+      if (ball.state === 4) resetBall();
+    }
+    gameScene = nextScene;
+    syncSceneHudVisibility();
+
+    if (gameScene === "AR_CAPTURE") {
+      encounterIntroT = 0.0;
+      if (!wildMon) spawnWildPokemon();
+      if (ball.state === 4) resetBall();
+      maybeShowScreenGuide("AR_CAPTURE");
+    } else if (gameScene === "LIVE_BATTLE") {
+      maybeShowScreenGuide("LIVE_BATTLE");
+    }
+    updateHud();
+
     triggerSceneTransition(labels[nextScene] || "", () => {
-      gameScene = nextScene;
-      const mapHud = document.getElementById("map-overworld-hud");
-      const arHud = document.getElementById("ar-encounter-hud");
-      const battleHud = document.getElementById("live-battle-hud");
-
-      if (mapHud) mapHud.style.display = gameScene === "CITY_MAP" ? "block" : "none";
-      if (arHud) arHud.style.display = gameScene === "AR_CAPTURE" ? "block" : "none";
-      if (battleHud) battleHud.style.display = gameScene === "LIVE_BATTLE" ? "block" : "none";
-
-      if (gameScene === "AR_CAPTURE") {
-        encounterIntroT = 0.0;
-        if (!wildMon) spawnWildPokemon();
-        maybeShowScreenGuide("AR_CAPTURE");
-      } else if (gameScene === "LIVE_BATTLE") {
-        maybeShowScreenGuide("LIVE_BATTLE");
-      }
+      syncSceneHudVisibility();
       updateHud();
     });
   }
@@ -1393,32 +1418,7 @@ window.PokeGameUI = (function() {
         drawCmds.push({ id: 11, mesh: bMesh, model: mBuddy, speciesId: buddyMon.speciesId });
       }
 
-      // 3.5. EDIFÍCIOS ARQUITETÔNICOS 3D & ÁRVORES 3D NOS QUARTEIRÕES DA CIDADE
-      const blockBaseX = Math.floor(cityState.playerX / 12) * 12;
-      const blockBaseZ = Math.floor(cityState.playerZ / 12) * 12;
-      const treeMesh = E.buildCityTree3DMesh();
-      for (let bx = -2; bx <= 2; ++bx) {
-        for (let bz = -2; bz <= 2; ++bz) {
-          const cx = blockBaseX + bx * 12;
-          const cz = blockBaseZ + bz * 12;
-          // Não coloca prédio em cima do jogador ou muito longe
-          const dP = Math.hypot(cx - cityState.playerX, cz - cityState.playerZ);
-          if (dP < 5.2 || dP > 44.0) continue;
-          const bHash = Math.abs((Math.round(cx) * 73856093) ^ (Math.round(cz) * 19349663));
-          const bMesh = E.buildCityBuilding3DMesh(bHash % 3);
-          drawCmds.push({
-            id: 8,
-            mesh: bMesh,
-            model: E.mat4Translation(cx, -1.25, cz)
-          });
-          // Árvores 3D de calçada ao lado dos edifícios
-          drawCmds.push({
-            id: 9,
-            mesh: treeMesh,
-            model: E.mat4Translation(cx + 2.2, -1.25, cz + 2.2)
-          });
-        }
-      }
+      // (Edifícios permanecem desenhados apenas planos no chão em captureCameraAndComputeSobel, sem obstruir Ginásios!)
 
       // 4. POKÉSTOPS 3D
       cityState.pokestops.forEach((ps, idx) => {
@@ -2434,14 +2434,20 @@ window.PokeGameUI = (function() {
     if (ball.throwBonusLabel.includes("EXCELLENT")) xpBase += 1000;
     else if (ball.throwBonusLabel.includes("GREAT")) xpBase += 150;
     const xpGain = window.PokeStorage.addXp(xpBase);
+    const caughtMon = wildMon;
 
+    // Retorna automaticamente a cena de fundo para o Mapa 3D ao concluir a captura,
+    // evitando que o jogador fique preso na tela de captura ao fechar o modal pelo (X) ou após avaliar IVs!
+    resetBall();
+    gameScene = "CITY_MAP";
+    syncSceneHudVisibility();
     updateHud();
 
     openModal(" GOTCHA! POKÉMON CAPTURADO!", `
       <div class="pogo-white-card" style="text-align:center;">
-        <img src="${E.getPokemonCardImageSrc(wildMon.speciesId, false, wildMon.isShiny)}" style="width:96px;height:96px;object-fit:contain;"/>
+        <img src="${E.getPokemonCardImageSrc(caughtMon.speciesId, false, caughtMon.isShiny)}" style="width:96px;height:96px;object-fit:contain;"/>
         <h3 style="color:#1c7c74;margin:4px 0;">
-          ${wildMon.isShiny ? "* SHINY " : ""}${wildMon.name} (CP ${wildMon.cp})
+          ${caughtMon.isShiny ? "* SHINY " : ""}${caughtMon.name} (CP ${caughtMon.cp})
         </h3>
         <p style="font-size:12px;color:#527a80;font-weight:700;">
           ${isNewDex ? "[NEW] NOVO REGISTRO NA POKÉDEX!" : "Capturado com sucesso!"}
@@ -2452,13 +2458,13 @@ window.PokeGameUI = (function() {
           <div><div class="stat-cap-val">+${candyGain}</div><div class="stat-cap-lbl">Candies</div></div>
         </div>
         <div style="font-size:12px;font-weight:800;color:#254a52;margin-bottom:12px;">
-          IVs: ATK ${wildMon.ivAtk} / DEF ${wildMon.ivDef} / STA ${wildMon.ivSta} (${wildMon.ivPercent}%)
+          IVs: ATK ${caughtMon.ivAtk} / DEF ${caughtMon.ivDef} / STA ${caughtMon.ivSta} (${caughtMon.ivPercent}%)
         </div>
         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
-          <button class="pogo-pill-btn" onclick="window.PokeGameUI.closeModal(); window.PokeGameUI.toggleSceneMode('CITY_MAP');">
-            [MAPA] Voltar ao Mapa
+          <button class="pogo-pill-btn" onclick="window.PokeGameUI.closeModal();">
+            [MAPA] Continuar no Mapa
           </button>
-          <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.showPokemonDetailSheet('${wildMon.uid}')">
+          <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.showPokemonDetailSheet('${caughtMon.uid}')">
              Avaliar IVs
           </button>
         </div>
@@ -3257,6 +3263,16 @@ window.PokeGameUI = (function() {
   function closeModal() {
     window.PokeAudio.playUiClick();
     document.getElementById("game-modal").classList.remove("open");
+    // Watchdog de segurança ao fechar qualquer modal: se uma captura, batalha ou evolução já terminou, garante retorno ao Mapa!
+    if (
+      (gameScene === "AR_CAPTURE" && (!wildMon || ball.state === 4)) ||
+      (gameScene === "LIVE_BATTLE" && !liveBattle.active) ||
+      (gameScene === "EVOLUTION_CUTSCENE" && !evoScene.active)
+    ) {
+      gameScene = "CITY_MAP";
+      syncSceneHudVisibility();
+      updateHud();
+    }
   }
 
   // ============================================================================
@@ -4308,6 +4324,15 @@ window.PokeGameUI = (function() {
     }
 
     const timeSec = now * 0.001;
+    // Watchdog contínuo de cena: impede travamento caso batalha/evolução/captura encerre fora de ordem
+    if (
+      (gameScene === "LIVE_BATTLE" && !liveBattle.active) ||
+      (gameScene === "EVOLUTION_CUTSCENE" && !evoScene.active) ||
+      (gameScene === "AR_CAPTURE" && (!wildMon || ball.state === 4))
+    ) {
+      gameScene = "CITY_MAP";
+      syncSceneHudVisibility();
+    }
     updateCityMovement(dt);
     updatePokeballPhysics(dt);
 

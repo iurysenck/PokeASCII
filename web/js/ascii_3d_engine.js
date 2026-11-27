@@ -652,6 +652,82 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     }
     for (let i = 0; i < nodes.length; ++i) getWorldMat(i);
 
+    function collectSubtree(rootIdx) {
+      const list = [rootIdx];
+      const stack = [rootIdx];
+      while (stack.length > 0) {
+        const cur = stack.pop();
+        const ch = nodes[cur] && nodes[cur].children;
+        if (Array.isArray(ch)) {
+          for (let i = 0; i < ch.length; ++i) {
+            list.push(ch[i]);
+            stack.push(ch[i]);
+          }
+        }
+      }
+      return list;
+    }
+
+    // 1.5. RELAXAMENTO ESQUELÉTICO AUTOMÁTICO DE T-POSE (Ombros, Cotovelos e Caudas)
+    // Detecta braços esticados horizontalmente em T-Pose e aplica rotação pivô natural de combate!
+    for (let ni = 0; ni < nodes.length; ++ni) {
+      const name = (nodes[ni] && nodes[ni].name) || "";
+      if (!/^(0\d+\s+)?(l|r|left_|right_)(arm\d*|arm_01)(_\d+)?$/i.test(name)) continue;
+      const sub = collectSubtree(ni);
+      const handIdx = sub.find((si) => /hand/i.test((nodes[si] && nodes[si].name) || "")) ||
+                      sub.find((si) => /forearm|arm_02/i.test((nodes[si] && nodes[si].name) || ""));
+      if (handIdx === undefined) continue;
+
+      const mS = worldMats[ni], mH = worldMats[handIdx];
+      const dx = mH[12] - mS[12], dy = mH[13] - mS[13], dz = mH[14] - mS[14];
+      if (Math.abs(dx) > 1.32 * Math.max(Math.abs(dy), Math.abs(dz)) && Math.abs(dx) > 0.04) {
+        const signX = dx > 0 ? 1 : -1;
+        const rotDown = mat4RotZ(-signX * (46 * Math.PI / 180));
+        const rotFwd  = mat4RotY(-signX * (24 * Math.PI / 180));
+        const rot = mat4Mul(rotFwd, rotDown);
+        const pivotMat = mat4Mul(
+          mat4Translation(mS[12], mS[13], mS[14]),
+          mat4Mul(rot, mat4Translation(-mS[12], -mS[13], -mS[14]))
+        );
+        for (let k = 0; k < sub.length; ++k) {
+          const si = sub[k];
+          worldMats[si] = mat4Mul(pivotMat, worldMats[si]);
+        }
+
+        const foreIdx = sub.find((si) => /forearm|arm_02/i.test((nodes[si] && nodes[si].name) || ""));
+        if (foreIdx !== undefined) {
+          const foreSub = collectSubtree(foreIdx);
+          const mF = worldMats[foreIdx];
+          const rotElbow = mat4Mul(mat4RotY(-signX * (22 * Math.PI / 180)), mat4RotZ(signX * (12 * Math.PI / 180)));
+          const elbowPivot = mat4Mul(
+            mat4Translation(mF[12], mF[13], mF[14]),
+            mat4Mul(rotElbow, mat4Translation(-mF[12], -mF[13], -mF[14]))
+          );
+          for (let k = 0; k < foreSub.length; ++k) {
+            const fsi = foreSub[k];
+            worldMats[fsi] = mat4Mul(elbowPivot, worldMats[fsi]);
+          }
+        }
+      }
+    }
+
+    // Curva suavemente para cima caudas esticadas horizontalmente em bind-pose (ex: Charmander, Charmeleon, Charizard)
+    for (let ni = 0; ni < nodes.length; ++ni) {
+      const name = (nodes[ni] && nodes[ni].name) || "";
+      if (!/^(0\d+\s+)?(tail2|tail3|tail_02|tail_03)(_\d+)?$/i.test(name)) continue;
+      const sub = collectSubtree(ni);
+      const mT = worldMats[ni];
+      const curlRot = mat4RotX(22 * Math.PI / 180);
+      const curlPivot = mat4Mul(
+        mat4Translation(mT[12], mT[13], mT[14]),
+        mat4Mul(curlRot, mat4Translation(-mT[12], -mT[13], -mT[14]))
+      );
+      for (let k = 0; k < sub.length; ++k) {
+        const si = sub[k];
+        worldMats[si] = mat4Mul(curlPivot, worldMats[si]);
+      }
+    }
+
     const skinJointMats = (gltf.skins || []).map((sk) => {
       const ibmAcc = sk.inverseBindMatrices !== undefined ? getTypedAccessor(sk.inverseBindMatrices) : null;
       const ibmData = ibmAcc ? ibmAcc.data : null;
@@ -855,7 +931,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     const wSpanX = Math.max(1e-4, wMaxX - wMinX);
     const wSpanY = Math.max(1e-4, wMaxY - wMinY);
     const wSpanZ = Math.max(1e-4, wMaxZ - wMinZ);
-    const normScale = 1.78 / Math.max(wSpanX * 0.88, wSpanY, wSpanZ * 0.78);
+    const normScale = 1.78 / Math.max(wSpanX * 0.78, wSpanY, wSpanZ * 0.54);
     const cx = (wMinX + wMaxX) * 0.5;
     const cz = (wMinZ + wMaxZ) * 0.5;
 
