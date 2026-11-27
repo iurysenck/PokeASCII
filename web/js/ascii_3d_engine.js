@@ -7,7 +7,7 @@
 // são malhas 3D reais rasterizadas no G-Buffer e quantizadas em caracteres ASCII!
 // ============================================================================
 
-window.Ascii3DEngine = (function() {
+window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
 
   const RAMP_HD = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
   const RAMP_STD = " .,:;+*%#@";

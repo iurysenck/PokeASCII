@@ -1,4 +1,4 @@
-const CACHE_NAME = "pokeascii-ar-v8";
+const CACHE_NAME = "pokeascii-ar-v9";
 const ASSETS = [
   "./",
   "./index.html",
@@ -27,20 +27,18 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Network-First com fallback Offline: garante que atualizações carreguem imediatamente!
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const fetchPromise = fetch(event.request)
-        .then((networkRes) => {
-          if (networkRes && networkRes.status === 200 && event.request.url.startsWith(self.location.origin)) {
-            const copy = networkRes.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-          }
-          return networkRes;
-        })
-        .catch(() => cached);
-      return cached || fetchPromise;
-    })
+    fetch(event.request)
+      .then((networkRes) => {
+        if (networkRes && networkRes.status === 200 && event.request.url.startsWith(self.location.origin)) {
+          const copy = networkRes.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
+        return networkRes;
+      })
+      .catch(() => caches.match(event.request))
   );
 });

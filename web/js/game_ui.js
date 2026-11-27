@@ -12,7 +12,7 @@
 // ============================================================================
 
 window.PokeGameUI = (function() {
-  const E = window.PokeAsciiEngine;
+  const E = window.PokeAsciiEngine || window.Ascii3DEngine;
   let canvas, ctx, videoEl;
   let sampleCanvas, sampleCtx;
 

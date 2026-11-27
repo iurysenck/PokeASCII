@@ -332,6 +332,11 @@ window.PokeData = (function() {
     };
   }
 
+  for (const [k, it] of Object.entries(ITEMS_CATALOG)) {
+    it.type = it.cat;
+    it.price = it.cat === "ball" ? (k === "master_ball" ? 250 : 25) : (it.cat === "berry" ? 20 : 60);
+  }
+
   for (const r of RAW_SPECIES) {
     const types = r[3] ? [r[2], r[3]] : [r[2]];
     const mv = defaultMovesForTypes(r[2], r[3]);
@@ -348,9 +353,12 @@ window.PokeData = (function() {
       baseCatchRate: r[10],
       archetype: r[11],
       evolvesTo: r[12] || 0,
-      candyCost: r[13] || 0,
+      candyCost: r[13] || 25,
+      evoCandyCost: r[13] || 25,
       fastMove: mv.fastMove,
-      chargedMove: mv.chargedMove
+      chargedMove: mv.chargedMove,
+      fastMoves: [mv.fastMove],
+      chargedMoves: [mv.chargedMove]
     });
   }
 
@@ -364,6 +372,7 @@ window.PokeData = (function() {
     const arch = ALL_ARCHETYPES[(h >> 8) % ALL_ARCHETYPES.length];
     const isRare = (id % 25 === 0);
     const mv = defaultMovesForTypes(t1, t2);
+    const cCost = (id % 3 === 1) ? 25 : 100;
     SPECIES_BY_ID.set(id, {
       id,
       name: `Pokemon #${id}`,
@@ -377,9 +386,12 @@ window.PokeData = (function() {
       baseCatchRate: isRare ? 0.08 : 0.25,
       archetype: arch,
       evolvesTo: (id < 1020 && (id % 3 !== 0)) ? (id + 1) : 0,
-      candyCost: (id % 3 === 1) ? 25 : 100,
+      candyCost: cCost,
+      evoCandyCost: cCost,
       fastMove: mv.fastMove,
       chargedMove: mv.chargedMove,
+      fastMoves: [mv.fastMove],
+      chargedMoves: [mv.chargedMove],
       needsWikiSync: true
     });
   }
@@ -586,6 +598,8 @@ window.PokeData = (function() {
       ivAtk,
       ivDef,
       ivSta,
+      ivPercent: Math.round(((ivAtk + ivDef + ivSta) / 45) * 100),
+      scaleVariation: 0.92 + Math.random() * 0.18,
       cp,
       hp: maxHp,
       maxHp,
@@ -601,6 +615,7 @@ window.PokeData = (function() {
     FAST_MOVES,
     CHARGED_MOVES,
     ITEMS_CATALOG,
+    ITEMS: ITEMS_CATALOG,
     SPECIES_BY_ID,
     getSpecies,
     syncSpeciesFromPokeAPI,
@@ -610,6 +625,7 @@ window.PokeData = (function() {
     evaluateIvStars,
     getTypeMedalInfo,
     computeProgressiveRareBoost,
+    calculateRareProgressMultiplier: (profile, balanceCfg) => computeProgressiveRareBoost(balanceCfg, profile).totalMult,
     rollAnomalyUltraRareSpawn,
     rollWeightedSpawn
   };
