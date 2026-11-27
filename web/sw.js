@@ -1,4 +1,4 @@
-const CACHE_NAME = "pokeascii-ar-v6";
+const CACHE_NAME = "pokeascii-ar-v7";
 const ASSETS = [
   "./",
   "./index.html",

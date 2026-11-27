@@ -273,6 +273,22 @@ window.PokeStorage = (function() {
       typeCounts: { Electric: 1 },
       anomalyCharge: 40,
       pokemonBox: [starter],
+      eggs: [
+        { id: "egg_1", kmRequired: 2.0, kmWalked: 0.45, incubating: true },
+        { id: "egg_2", kmRequired: 5.0, kmWalked: 0.0, incubating: false },
+        { id: "egg_3", kmRequired: 10.0, kmWalked: 0.0, incubating: false }
+      ],
+      researchStamps: 3,
+      specialResearchStage: 1,
+      tasksProgress: {
+        caught: 1,
+        throws: 0,
+        spins: 0,
+        raids: 0,
+        berries: 0,
+        walkedM: 0,
+        claimedIds: []
+      },
       stats: {
         totalCaught: 1,
         curveballsLanded: 0,
@@ -343,10 +359,15 @@ window.PokeStorage = (function() {
     } catch (_) {}
 
     if (loaded) {
-      profile = Object.assign(createDefaultProfile(), loaded);
-      profile.bag = Object.assign(createDefaultProfile().bag, loaded.bag || {});
-      profile.avatar = Object.assign(createDefaultProfile().avatar, loaded.avatar || {});
-      profile.stats = Object.assign(createDefaultProfile().stats, loaded.stats || {});
+      const def = createDefaultProfile();
+      profile = Object.assign(def, loaded);
+      profile.bag = Object.assign(def.bag, loaded.bag || {});
+      profile.avatar = Object.assign(def.avatar, loaded.avatar || {});
+      profile.stats = Object.assign(def.stats, loaded.stats || {});
+      profile.tasksProgress = Object.assign(def.tasksProgress, loaded.tasksProgress || {});
+      if (!Array.isArray(profile.eggs) || profile.eggs.length === 0) {
+        profile.eggs = def.eggs;
+      }
     }
     return profile;
   }

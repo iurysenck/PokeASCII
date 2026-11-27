@@ -1,2779 +1,3532 @@
 "use strict";
 
 // ============================================================================
-// CONTROLADOR PRINCIPAL IDÊNTICO AO POKÉMON GO (REFS):
-// - Mapa GPS 3D Limpo (Azul-Índigo + Ruas Reais OpenStreetMap com Borda Salmão)
-// - Pinch-to-Zoom (Pinça no Mobile + Botões +/- + Scroll)
-// - Pokémons 3D com Texto ASCII Contido na Silhueta + Silhueta 3D Escura na Pokédex/Nearby
-// - Anel de Captura Grande + Animação Entrando na Pokébola e Saindo da Pokébola!
+// POKEASCII GO 3D — 100% PURE 3D G-BUFFER ASCII RENDERER + POKÉMON GO CLONE UI
+// - Todas as cenas (CITY_MAP, AR_CAPTURE, LIVE_BATTLE, EVOLUTION_CUTSCENE) são
+//   renderizadas 100% em Caracteres ASCII TrueColor (G-Buffer 3D + Sobel 3D)!
+// - Anel de Raio de Ação 3D (3.5m) invariante à rotação da câmera + Zoom até 55m
+// - Animação 3D em ASCII entrando na Pokébola (tampa abre + feixe laser) e saindo
+// - Batalhas 3D em Tempo Real em ASCII + Cutscene 3D de Evolução com Morph
+// - Clone completo do Pokémon GO: Mapa GPS/OSM, Radar Nearby (Pokémon/Raid/Anomaly),
+//   Pesquisas & GO Pass (Today/Field/Special), Box (Tags/Pokémon/Eggs) e Appraisal IV
 // ============================================================================
 
 window.PokeGameUI = (function() {
-  const E = window.Ascii3DEngine;
-  const D = window.PokeData;
-  const A = window.PokeAudio;
-  const S = window.PokeStorage;
-  const B = window.PokeBalance;
+  const E = window.PokeAsciiEngine;
+  let canvas, ctx, videoEl;
+  let sampleCanvas, sampleCtx;
 
-  let canvas, ctx, video, offCanvas, offCtx;
-  let gameScene = "CITY_MAP"; // "CITY_MAP" ou "AR_CAPTURE"
+  // Grade ASCII adaptativa por FPS (garante 60 FPS em qualquer celular ou PC)
+  let cols = 128, rows = 70;
+  let cellW = 10, cellH = 16;
+  let fontLoaded = false;
+
+  // Buffers do G-Buffer 3D e do Pós-Processador ASCII
+  let camLuma, camR, camG, camB, edgeMag, edgeDir;
+  let gbZ, gbId, gbNx, gbNy, gbNz, gbColR, gbColG, gbColB, gbLight;
+
+  // Estado da Cena:
+  // "CITY_MAP" (Mapa 3D GPS em ASCII) | "AR_CAPTURE" (Captura 3D em ASCII)
+  // "LIVE_BATTLE" (Arena 3D Ao Vivo em ASCII) | "EVOLUTION_CUTSCENE" (Evolução 3D Morph em ASCII)
+  let gameScene = "CITY_MAP";
+
+  // Câmera e Sensores AR
   let useRealCamera = false;
-  let hasImu = false;
-  let imuYaw = 0, imuPitch = 0.05, imuRoll = 0, imuBaseAlpha = null;
-  let emaFrameMs = 16.0;
+  let camYaw = 0, camPitch = 0.08, camRoll = 0;
+  let camPos = { x: 0, y: 0.25, z: 0 };
+  let isDraggingLook = false;
+  let dragStartX = 0, dragStartY = 0;
 
-  // Pose da Câmera AR no Encontro de Captura
-  const pose = {
-    pos: E.vec3(0, 0, 0),
-    yaw: 0.0,
-    pitch: 0.05,
-    roll: 0.0
-  };
+  // Pinça de 2 Dedos (Pinch-to-Zoom) no Mobile
+  let activePinchDist = null;
 
-  // Estado do Mapa GPS Real da Cidade (Ref: 22.18.13 (2).jpeg)
+  // Estado do Mapa 3D da Cidade + GPS Real + Ruas OpenStreetMap
   const cityState = {
     playerX: 0.0,
     playerZ: 0.0,
     facingYaw: 0.0,
+    isMoving: false,
+    walkCycle: 0.0,
     camOrbitYaw: 0.0,
-    camOrbitPitch: 0.68,  // Visão aérea inclinada 3D igual à ref 22.18.13 (2).jpeg!
-    camOrbitDist: 9.5,    // Controlável por Pinch-to-Zoom no celular (3.5m até 20.0m)!
-    isWalking: false,
-    joyDx: 0,
-    joyDy: 0,
+    camOrbitPitch: 0.56,
+    camOrbitDist: 10.5, // Zoom de 2.5m (perto) até 55.0m (visão estratégica ampla!)
+    joyDx: 0.0,
+    joyDz: 0.0,
     joyActive: false,
+    // GPS Real (navigator.geolocation + OpenStreetMap Overpass)
     gpsActive: false,
-    baseLat: -23.5614,
-    baseLon: -46.6559,
-    cityName: "Toque para ativar seu GPS Real",
-    osmRoads: [],         // Ruas reais do OpenStreetMap [{pts: [{x,z}, ...], name}]
-    osmBuildings: [],     // Prédios 3D reais do OpenStreetMap [{pts: [{x,z}, ...]}]
-    otherPlayers: [],
-    pois: [
-      { id: "p1", type: "pokestop", name: "PokéStop Praça Central",    x: -4.8, z: -6.5 },
-      { id: "p2", type: "pokestop", name: "PokéStop Avenida Principal", x:  6.4, z: -4.8 },
-      { id: "p3", type: "pokestop", name: "PokéStop Parque Municipal",  x: -6.2, z:  7.2 },
-      { id: "p4", type: "pokestop", name: "PokéStop Esquina Cultural",  x:  5.0, z: -11.5 },
-      { id: "g1", type: "gym",      name: "Ginásio Arena Central",      x: -2.2, z: -13.0, guardId: 26, cp: 1950 },
-      { id: "r1", type: "raid",     name: "Raid 5★: MEWTWO",            x:  8.5, z: -12.0, bossId: 150, cp: 45800 },
-      { id: "v1", type: "villain",  name: "Balão Equipe Rocket/Shadow", x: -3.2, z: -3.8,  bossId: 94,  cp: 2400 }
-    ]
+    gpsWatchId: null,
+    originLat: null,
+    originLon: null,
+    currentLat: null,
+    currentLon: null,
+    neighborhoodName: "Cidade ASCII Central",
+    osmRoads: [],
+    osmBuildings: [],
+    osmFetched: false,
+    pokestops: [],
+    gyms: [],
+    wildSpawns: [],
+    villainBalloon: { x: 8.0, y: 3.4, z: -9.0, active: true }
   };
 
-  let wildSpawns = [];
-  let activeWildIdx = 0;
+  // Encontro de Captura AR 3D
+  let wildMon = null;
+  let wildAnchor = { x: 0.0, y: -1.10, z: -4.5 };
+  let anchorLocked = true;
+  let activeBerry = null;
   let activeBallType = "poke_ball";
-  let clickableMapTargets = [];
+  let targetRingPhase = 1.0;
 
-  // Estado da Pokébola com Animações:
-  // 0: Idle/Spinning no Dock
-  // 1: Voando em 3D (com curva Magnus se Curveball)
-  // 2: ENTRANDO NA POKÉBOLA (A Pokébola abre no ar, dispara feixe vermelho e suga o Pokémon!)
-  // 3: Balançando no chão (1..3 shakes)
-  // 4: Captura Concluída (Explosão de estrelas GOTCHA!)
-  // 5: SAINDO DA POKÉBOLA (A Pokébola abre com clarão branco/vermelho e o Pokémon salta para fora!)
+  // Estado da Batalha 3D Ao Vivo em ASCII (LIVE_BATTLE)
+  const liveBattle = {
+    active: false,
+    mode: "GYM",
+    title: "GINÁSIO",
+    timerSec: 100,
+    lastTickTime: 0,
+    playerMon: null,
+    playerHp: 100,
+    playerMaxHp: 100,
+    playerEnergy: 0,
+    playerShields: 2,
+    shieldActiveUntil: 0,
+    dodgeOffsetX: 0,
+    dodgeUntil: 0,
+    playerAttackAnimUntil: 0,
+    enemyMon: null,
+    enemyHp: 120,
+    enemyMaxHp: 120,
+    enemyNextAttackAt: 0,
+    enemyIsChargingSpecial: false,
+    enemySpecialFireAt: 0,
+    enemyAttackAnimUntil: 0,
+    vfxList: [],       // Projéteis e feixes elementais em ASCII
+    floatingTexts: [], // Textos de dano flutuantes
+    rewardCoins: 35,
+    rewardDust: 900,
+    rewardXp: 1200,
+    isRaidEncounter: false
+  };
+
+  // Estado da Cutscene 3D de Evolução com Morph em ASCII (EVOLUTION_CUTSCENE)
+  const evoScene = {
+    active: false,
+    monUid: null,
+    fromSpeciesId: 25,
+    toSpeciesId: 26,
+    fromName: "Pikachu",
+    toName: "Raichu",
+    newCp: 1200,
+    startTime: 0,
+    durationSec: 6.8
+  };
+
+  // Física 3D da Pokébola + Animação Entrando (state=2) e Saindo (state=5)
   const ball = {
+    // 0=Ready, 1=Flying, 2=EnteringBall (Tampa 3D abre + feixe laser), 3=Shaking, 4=Caught, 5=ExitingBall (Escapou!)
     state: 0,
-    pos: E.vec3(0, 0, 0),
-    vel: E.vec3(0, 0, 0),
-    spinAngle: 0,
-    curveRpm: 0,
-    curveDir: 1,
-    isCurveball: false,
-    ringRadius: 1.0, // Oscila de 1.0 até 0.15 cobrindo TODO o corpo do Pokémon!
+    pos: { x: 0, y: -0.55, z: -1.35 },
+    vel: { x: 0, y: 0, z: 0 },
+    spinRpm: 0,
+    curveDir: 0,
+    rotAngle: 0,
+    lidOpenAngle: 0,  // Ângulo 3D de abertura da tampa superior da Pokébola (0 .. 1.25 rad)
+    morphProgress: 0, // 0..1 progresso do Pokémon entrando ou saindo da Pokébola
+    shakeCount: 0,
+    shakeTimer: 0,
+    shakeTarget: 3,
     throwBonusLabel: "",
     throwBonusMult: 1.0,
-    timer: 0,
-    shakes: 0,
-    shakesRequired: 3,
-    willCatch: true,
-    targetIdx: 0,
-    lidOpenAngle: 0 // Ângulo de abertura da tampa superior da Pokébola!
+    isDraggingBall: false,
+    lastPointerX: 0,
+    lastPointerY: 0,
+    lastPointerTime: 0,
+    spinHistory: []
   };
 
-  let battleState = null;
-  let evoCutscene = null; // Estado da Cutscene 3D de Evolução com Morph de Silhueta!
-  let deferredPwaPrompt = null;
+  // Projetados 2D para clique e etiquetas flutuantes
+  let projectedClickTargets = [];
+  let lastWildScreenBox = { x: 0, y: 0, radiusPx: 75 };
 
-  // Paleta de Cores e Glifos ASCII por Tipo Elemental para os Efeitos Visuais (VFX) de Ataques e Especiais!
-  const ELEMENTAL_VFX_STYLE = {
-    Electric: { color: "#fde047", glow: "#eab308", glyphs: "⚡*+/\\%#", icon: "⚡" },
-    Fire:     { color: "#fb923c", glow: "#ef4444", glyphs: "🔥@#*+^~", icon: "🔥" },
-    Water:    { color: "#38bdf8", glow: "#0284c7", glyphs: "💧~≈=o*@", icon: "💧" },
-    Grass:    { color: "#4ade80", glow: "#16a34a", glyphs: "🍃/*+~@#", icon: "🍃" },
-    Psychic:  { color: "#f472b6", glow: "#9333ea", glyphs: "🌀()@✦*%", icon: "🌀" },
-    Ghost:    { color: "#c084fc", glow: "#581c87", glyphs: "🟣#@%*?~", icon: "👻" },
-    Dragon:   { color: "#818cf8", glow: "#f59e0b", glyphs: "🐉//\\\\✦#", icon: "🐉" },
-    Ice:      { color: "#bae6fd", glow: "#0ea5e9", glyphs: "❄️*+<>#◊", icon: "❄️" },
-    Fighting: { color: "#f87171", glow: "#b91c1c", glyphs: "🥊✖//\\\\#", icon: "🥊" },
-    Rock:     { color: "#d6d3d1", glow: "#78716c", glyphs: "🪨▲■#*+=", icon: "🪨" },
-    Ground:   { color: "#fcd34d", glow: "#b45309", glyphs: "🌋▲~=#*+", icon: "🌋" },
-    Flying:   { color: "#e0f2fe", glow: "#38bdf8", glyphs: "🌪️~//\\\\*", icon: "🌪️" },
-    Poison:   { color: "#e879f9", glow: "#7e22ce", glyphs: "☠️o°@%#*", icon: "☠️" },
-    Bug:      { color: "#a3e635", glow: "#4d7c0f", glyphs: "🐝//\\\\*+", icon: "🐝" },
-    Steel:    { color: "#e2e8f0", glow: "#64748b", glyphs: "⚙️✦+#=<>", icon: "⚙️" },
-    Dark:     { color: "#94a3b8", glow: "#0f172a", glyphs: "🌑#@%*//", icon: "🌑" },
-    Fairy:    { color: "#fbcfe8", glow: "#db2777", glyphs: "✨✦*+♡@#", icon: "✨" },
-    Normal:   { color: "#f8fafc", glow: "#94a3b8", glyphs: "💥*+#@//", icon: "💥" }
-  };
+  // Escalador Dinâmico de FPS
+  let fpsFrames = 0, fpsLastTime = performance.now(), currentFps = 60;
+  let qualityTier = 2; // 1 = Ultra-Low, 2 = Balanced HD, 3 = Ultra-Sharp ASCII
 
-  // ============================================================================
-  // GPS REAL DO DISPOSITIVO + MAPA VETORIAL 3D DO OPENSTREETMAP
-  // ============================================================================
-  function latLonToMeters(lat, lon) {
-    const dLat = (lat - cityState.baseLat) * 111320.0;
-    const dLon = (lon - cityState.baseLon) * 111320.0 * Math.cos(cityState.baseLat * Math.PI / 180.0);
-    return { x: dLon / 9.0, z: -dLat / 9.0 };
+  function allocateAsciiBuffers(c, r) {
+    cols = c; rows = r;
+    const n = cols * rows;
+    camLuma = new Float32Array(n);
+    camR = new Float32Array(n);
+    camG = new Float32Array(n);
+    camB = new Float32Array(n);
+    edgeMag = new Float32Array(n);
+    edgeDir = new Uint8Array(n);
+
+    gbZ = new Float32Array(n);
+    gbId = new Int32Array(n);
+    gbNx = new Float32Array(n);
+    gbNy = new Float32Array(n);
+    gbNz = new Float32Array(n);
+    gbColR = new Float32Array(n);
+    gbColG = new Float32Array(n);
+    gbColB = new Float32Array(n);
+    gbLight = new Float32Array(n);
   }
 
-  async function fetchRealCityFromOpenStreetMap(lat, lon) {
-    cityState.baseLat = lat;
-    cityState.baseLon = lon;
+  function resizeViewport() {
+    if (!canvas) return;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
 
-    const pill = document.getElementById("gps-pill");
-    if (pill) pill.textContent = `📍 GPS (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
+    const targetCellW = qualityTier === 3 ? 8 : (qualityTier === 2 ? 10 : 13);
+    const targetCellH = Math.round(targetCellW * 1.55);
+    cellW = targetCellW;
+    cellH = targetCellH;
 
-    // 1. Nome real da rua e bairro via Nominatim
+    const newCols = Math.max(48, Math.min(200, Math.floor(canvas.width / cellW)));
+    const newRows = Math.max(30, Math.min(125, Math.floor(canvas.height / cellH)));
+    allocateAsciiBuffers(newCols, newRows);
+
+    if (sampleCanvas) {
+      sampleCanvas.width = newCols;
+      sampleCanvas.height = newRows;
+    }
+    fontLoaded = false;
+  }
+
+  // ============================================================================
+  // POPULAÇÃO DO MAPA 3D + INTEGRAÇÃO GPS REAL & OPENSTREETMAP
+  // ============================================================================
+  function initCityEntities() {
+    cityState.pokestops = [
+      { id: "ps_1", name: "PokéStop Praça Matrix", x: -5.5, z: -6.0, cooldownUntil: 0 },
+      { id: "ps_2", name: "PokéStop Fonte Digital", x: 6.5, z: -5.0, cooldownUntil: 0 },
+      { id: "ps_3", name: "PokéStop Parque Central", x: -6.0, z: 6.5, cooldownUntil: 0 },
+      { id: "ps_4", name: "PokéStop Estação Norte", x: 6.0, z: 6.5, cooldownUntil: 0 },
+      { id: "ps_5", name: "PokéStop Avenida Cyber", x: 0.0, z: -13.5, cooldownUntil: 0 },
+      { id: "ps_6", name: "PokéStop Boulevard Sul", x: 0.0, z: 13.5, cooldownUntil: 0 }
+    ];
+
+    cityState.gyms = [
+      { id: "gym_1", name: "Ginásio Trovão", team: "Trovão", color: [0.95, 0.78, 0.15], x: -12.5, z: -12.5, guardSpeciesId: 25, raidBossId: 145 },
+      { id: "gym_2", name: "Ginásio Chama", team: "Chama", color: [0.95, 0.25, 0.20], x: 12.5, z: -12.5, guardSpeciesId: 6, raidBossId: 146 },
+      { id: "gym_3", name: "Ginásio Maré", team: "Maré", color: [0.20, 0.58, 0.98], x: 12.5, z: 12.5, guardSpeciesId: 9, raidBossId: 150 }
+    ];
+
+    refreshCityWildSpawns();
+  }
+
+  function refreshCityWildSpawns() {
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+    while (cityState.wildSpawns.length < 6) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 2.8 + Math.random() * 11.5;
+      const mon = window.PokeData.rollWeightedSpawn(cfg, p.level, p);
+      // Solicita o upgrade assíncrono da malha 3D volumétrica oficial da espécie
+      E.getPokemonMesh(mon.speciesId, mon.isShiny);
+      cityState.wildSpawns.push({
+        mon,
+        x: cityState.playerX + Math.cos(angle) * dist,
+        z: cityState.playerZ + Math.sin(angle) * dist,
+        rotY: Math.random() * Math.PI * 2,
+        spawnedAt: performance.now()
+      });
+    }
+    updateHud();
+  }
+
+  function latLonToMeters(lat, lon) {
+    if (cityState.originLat === null || cityState.originLon === null) {
+      cityState.originLat = lat;
+      cityState.originLon = lon;
+    }
+    const dLat = (lat - cityState.originLat) * 111320.0;
+    const dLon = (lon - cityState.originLon) * 111320.0 * Math.cos(cityState.originLat * Math.PI / 180.0);
+    return { x: dLon * 0.35, z: -dLat * 0.35 };
+  }
+
+  async function fetchRealOpenStreetMapAround(lat, lon) {
+    if (cityState.osmFetched) return;
+    cityState.osmFetched = true;
+
     try {
-      const nomRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=17`);
+      const nomRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`);
       if (nomRes.ok) {
         const nom = await nomRes.json();
         const addr = nom.address || {};
-        const road = addr.road || addr.pedestrian || addr.suburb || "Sua Rua";
-        const city = addr.city || addr.town || addr.municipality || addr.state || "";
-        cityState.cityName = city ? `${road}, ${city}` : road;
-        if (pill) pill.textContent = `📍 ${cityState.cityName}`;
+        const road = addr.road || addr.pedestrian || addr.suburb || addr.neighbourhood || addr.city || "Sua Localização GPS";
+        const suburb = addr.suburb || addr.city_district || addr.town || addr.city || "";
+        cityState.neighborhoodName = suburb ? `${road} • ${suburb}` : road;
+        const pill = document.getElementById("gps-pill");
+        if (pill) pill.textContent = `📍 ${cityState.neighborhoodName}`;
       }
     } catch (_) {}
 
-    // 2. Ruas reais e Prédios reais num raio de 420m via OpenStreetMap Overpass API
     try {
-      const query = `[out:json][timeout:10];(way["highway"](around:420,${lat},${lon});way["building"](around:260,${lat},${lon});node["amenity"](around:420,${lat},${lon});node["shop"](around:420,${lat},${lon}););out body;>;out skel qt;`;
+      const query = `[out:json][timeout:10];(way["highway"](around:350,${lat},${lon});way["building"](around:250,${lat},${lon});node["amenity"](around:350,${lat},${lon}););out body;>;out skel qt;`;
       const ovRes = await fetch("https://overpass-api.de/api/interpreter", {
         method: "POST",
         body: "data=" + encodeURIComponent(query)
       });
       if (!ovRes.ok) return;
-      const ov = await ovRes.json();
+      const data = await ovRes.json();
       const nodes = new Map();
       const roads = [];
       const buildings = [];
-      const realPois = [];
+      const amenities = [];
 
-      for (const el of (ov.elements || [])) {
+      for (const el of (data.elements || [])) {
         if (el.type === "node") {
-          nodes.set(el.id, el);
-          if (el.tags && (el.tags.name || el.tags.amenity || el.tags.shop)) {
-            realPois.push(el);
+          nodes.set(el.id, latLonToMeters(el.lat, el.lon));
+          if (el.tags && (el.tags.name || el.tags.amenity)) {
+            const pos = latLonToMeters(el.lat, el.lon);
+            amenities.push({ name: el.tags.name || el.tags.amenity, x: pos.x, z: pos.z });
           }
         }
       }
-      for (const el of (ov.elements || [])) {
+
+      for (const el of (data.elements || [])) {
         if (el.type === "way" && el.nodes && el.nodes.length >= 2) {
-          const pts = [];
-          for (const nid of el.nodes) {
-            const n = nodes.get(nid);
-            if (n) pts.push(latLonToMeters(n.lat, n.lon));
-          }
-          if (pts.length >= 2) {
-            if (el.tags && el.tags.building) {
-              buildings.push({ pts });
-            } else {
-              roads.push({ pts, name: (el.tags && el.tags.name) || "" });
+          const pts = el.nodes.map(id => nodes.get(id)).filter(Boolean);
+          if (pts.length < 2) continue;
+          if (el.tags && el.tags.highway) {
+            const isMajor = /primary|secondary|tertiary|trunk|residential/.test(el.tags.highway);
+            roads.push({ pts, halfW: isMajor ? 1.55 : 0.95, name: el.tags.name || "" });
+          } else if (el.tags && el.tags.building) {
+            let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+            for (const p of pts) {
+              if (p.x < minX) minX = p.x;
+              if (p.x > maxX) maxX = p.x;
+              if (p.z < minZ) minZ = p.z;
+              if (p.z > maxZ) maxZ = p.z;
             }
+            buildings.push({ minX, maxX, minZ, maxZ });
           }
         }
       }
 
-      if (roads.length > 0) cityState.osmRoads = roads;
-      if (buildings.length > 0) cityState.osmBuildings = buildings.slice(0, 120);
-
-      if (realPois.length > 0) {
-        for (let i = 0; i < Math.min(realPois.length, cityState.pois.length - 1); ++i) {
-          const rp = realPois[i];
-          const mp = latLonToMeters(rp.lat, rp.lon);
-          cityState.pois[i].x = Math.max(-22, Math.min(22, mp.x));
-          cityState.pois[i].z = Math.max(-22, Math.min(22, mp.z));
-          if (rp.tags && rp.tags.name) cityState.pois[i].name = rp.tags.name;
+      if (roads.length > 0) {
+        cityState.osmRoads = roads;
+        cityState.osmBuildings = buildings;
+        for (let i = 0; i < Math.min(amenities.length, cityState.pokestops.length); ++i) {
+          cityState.pokestops[i].name = `PokéStop ${amenities[i].name}`;
+          cityState.pokestops[i].x = amenities[i].x;
+          cityState.pokestops[i].z = amenities[i].z;
         }
+        window.PokeStorage.showToast(`🗺️ Ruas reais carregadas em ASCII 3D: ${cityState.neighborhoodName}!`, "success");
       }
-      S.showToast(`🗺️ Mapa GPS Real carregado: ${cityState.cityName}!`, "info");
     } catch (_) {}
   }
 
-  function startRealGpsTracking(userClicked = false) {
+  function startRealGpsTracking(manualTrigger = false) {
     const pill = document.getElementById("gps-pill");
-    if (pill) pill.textContent = "📍 Obtendo GPS...";
-
-    const fallbackIpLocation = async () => {
-      try {
-        const ipRes = await fetch("https://ipapi.co/json/");
-        if (ipRes.ok) {
-          const ipd = await ipRes.json();
-          if (ipd.latitude && ipd.longitude) {
-            fetchRealCityFromOpenStreetMap(ipd.latitude, ipd.longitude);
-            return;
-          }
-        }
-      } catch (_) {}
-      if (pill) pill.textContent = "📍 Mapa Urbano 3D (Toque p/ GPS)";
-    };
-
-    if (!("geolocation" in navigator)) {
-      fallbackIpLocation();
+    if (!navigator.geolocation) {
+      if (pill) pill.textContent = "📍 Mapa 3D Local (Use o Joystick)";
       return;
     }
+    if (pill && manualTrigger) pill.textContent = "🛰️ Sincronizando GPS...";
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        cityState.currentLat = lat;
+        cityState.currentLon = lon;
         cityState.gpsActive = true;
-        cityState.playerX = 0;
-        cityState.playerZ = 0;
-        fetchRealCityFromOpenStreetMap(pos.coords.latitude, pos.coords.longitude);
-        navigator.geolocation.watchPosition(
-          (wp) => {
-            const mp = latLonToMeters(wp.coords.latitude, wp.coords.longitude);
-            const dx = mp.x - cityState.playerX, dz = mp.z - cityState.playerZ;
-            if (Math.hypot(dx, dz) > 0.12) {
-              cityState.playerX = mp.x;
-              cityState.playerZ = mp.z;
-              cityState.facingYaw = Math.atan2(dx, -dz);
-              cityState.isWalking = true;
-            }
-          },
-          () => {},
-          { enableHighAccuracy: true, maximumAge: 5000 }
-        );
-      },
-      (err) => {
-        if (userClicked) {
-          S.showToast(`⚠️ GPS do navegador bloqueado (${err.message}). Usando localização aproximada da cidade.`, "warn");
+
+        if (cityState.originLat === null || manualTrigger) {
+          cityState.originLat = lat;
+          cityState.originLon = lon;
+          cityState.playerX = 0;
+          cityState.playerZ = 0;
+        } else {
+          const m = latLonToMeters(lat, lon);
+          cityState.playerX = m.x;
+          cityState.playerZ = m.z;
         }
-        fallbackIpLocation();
+
+        if (pill) pill.textContent = `📍 ${cityState.neighborhoodName} (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
+        fetchRealOpenStreetMapAround(lat, lon);
       },
-      { enableHighAccuracy: true, timeout: 7000 }
+      () => {
+        if (pill) pill.textContent = `📍 ${cityState.neighborhoodName} (Modo Joystick)`;
+      },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 5000 }
     );
-  }
 
-  // Zoom no Mobile (Pinça ou Botões + / -)
-  function adjustZoom(deltaDist) {
-    A.playUiClick();
-    cityState.camOrbitDist = Math.max(3.5, Math.min(20.0, cityState.camOrbitDist + deltaDist));
-  }
-
-  function spawnWildWave(includeAnomaly = false) {
-    const prof = S.getProfile();
-    const cfg = B.get();
-    wildSpawns = [];
-    const baseAngles = [0.4, -0.7, 1.6, -1.8, 2.6, -2.8];
-
-    for (let i = 0; i < 6; ++i) {
-      const isAnom = includeAnomaly && i === 0;
-      const rolled = isAnom ? D.rollAnomalyUltraRareSpawn(cfg, prof.level) : D.rollWeightedSpawn(cfg, prof.level);
-      const sp = D.getSpecies(rolled.speciesId);
-      const dist = isAnom ? 2.1 : (2.2 + (i % 3) * 1.3);
-      const ang = baseAngles[i];
-
-      wildSpawns.push({
-        data: rolled,
-        species: sp,
-        mapX: cityState.playerX + Math.sin(ang) * dist,
-        mapZ: cityState.playerZ - Math.cos(ang) * dist,
-        pos: E.vec3(0, -1.0, -3.4),
-        visualScale: E.computeVisualScale(sp.height_m),
-        jumpOffset: 0,
-        actionTimer: i * 1.4,
-        calmedByNanab: false,
-        berryApplied: null,
-        insideBall: false,
-        morphProgress: 0 // 0: normal, 0->1: entrando/saindo da Pokébola!
-      });
+    if (cityState.gpsWatchId === null) {
+      cityState.gpsWatchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          cityState.currentLat = lat;
+          cityState.currentLon = lon;
+          const m = latLonToMeters(lat, lon);
+          const dx = m.x - cityState.playerX;
+          const dz = m.z - cityState.playerZ;
+          const dist = Math.hypot(dx, dz);
+          if (dist > 0.25 && dist < 120) {
+            cityState.facingYaw = Math.atan2(dx, -dz);
+            cityState.playerX = m.x;
+            cityState.playerZ = m.z;
+            cityState.isMoving = true;
+            onPlayerWalkedMeters(dist * 2.5);
+          }
+        },
+        () => {},
+        { enableHighAccuracy: true, maximumAge: 3000 }
+      );
     }
-    activeWildIdx = 0;
-    updateNearbyPillIcons();
   }
 
   // ============================================================================
-  // RENDERIZADOR 3D DO MAPA DA CIDADE (Ref: 22.18.13 (2).jpeg) & ENCONTRO AR
+  // CAMINHADA NO MAPA: PARCEIRO (CANDY) + INCUBADORA DE OVOS (2KM / 5KM / 10KM)
   // ============================================================================
-  function getCityCameraEye() {
-    const d = cityState.camOrbitDist;
-    const pitch = cityState.camOrbitPitch;
-    const yaw = cityState.camOrbitYaw;
-    return E.vec3(
-      cityState.playerX - Math.sin(yaw) * Math.cos(pitch) * d,
-      Math.sin(pitch) * d,
-      cityState.playerZ + Math.cos(yaw) * Math.cos(pitch) * d
-    );
-  }
-
-  function renderMainViewport(timeSec) {
-    const W = canvas.width, H = canvas.height;
-    clickableMapTargets = [];
-
-    if (gameScene === "CITY_MAP") {
-      renderPokemonGo3DCityMap(W, H, timeSec);
-    } else if (gameScene === "LIVE_BATTLE") {
-      renderPokemonGoLiveBattleArena(W, H, timeSec);
-    } else if (gameScene === "EVOLUTION_CUTSCENE") {
-      renderEvolutionMorphCutscene(W, H, timeSec);
-    } else {
-      renderPokemonGoArEncounter(W, H, timeSec);
+  function onPlayerWalkedMeters(meters) {
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+    p.distanceWalkedM = (p.distanceWalkedM || 0) + meters;
+    p.buddyWalkProgressM = (p.buddyWalkProgressM || 0) + meters;
+    if (p.tasksProgress) {
+      p.tasksProgress.walkedM = (p.tasksProgress.walkedM || 0) + meters;
     }
-  }
 
-  function renderPokemonGo3DCityMap(W, H, timeSec) {
-    // 1. Fundo Azul-Índigo Noturno idêntico à referência 22.18.13 (2).jpeg + Textura Matrix ASCII sutil
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
-    bgGrad.addColorStop(0, "#1c2d6b");
-    bgGrad.addColorStop(0.35, "#283c82");
-    bgGrad.addColorStop(1, "#243678");
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, W, H);
-
-    const aspect = W / Math.max(1, H);
-    const eye = getCityCameraEye();
-    const view = E.mat4View6DoF(eye, cityState.camOrbitYaw, -cityState.camOrbitPitch, 0);
-    const proj = E.mat4Perspective(46 * Math.PI / 180, aspect, 0.3, 60.0);
-    const vp = E.mat4Mul(proj, view);
-
-    // 2. Grade de Coordenadas ASCII 3D sutil no chão da cidade
-    ctx.save();
-    ctx.font = "bold 10px 'Cascadia Mono', Consolas, monospace";
-    ctx.fillStyle = "rgba(120, 175, 255, 0.14)";
-    const gx0 = Math.floor(cityState.playerX - 18), gx1 = Math.ceil(cityState.playerX + 18);
-    const gz0 = Math.floor(cityState.playerZ - 18), gz1 = Math.ceil(cityState.playerZ + 18);
-    for (let gz = gz0; gz <= gz1; gz += 2) {
-      for (let gx = gx0; gx <= gx1; gx += 2) {
-        const p = E.projectPoint3D(vp, gx, 0, gz, W, H);
-        if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H) {
-          ctx.fillText((gx % 4 === 0 && gz % 4 === 0) ? "+" : "·", p.x, p.y);
-        }
+    // 1. Parceiro (Buddy) encontra Candy
+    const needM = cfg.buddyDistancePerCandyM || 250;
+    if (p.buddyWalkProgressM >= needM) {
+      p.buddyWalkProgressM -= needM;
+      const buddy = p.pokemonBox.find(m => m.uid === p.buddyUid) || p.pokemonBox[0];
+      if (buddy) {
+        const cGain = Math.round(2 * (cfg.candyMultiplier || 1));
+        p.candies[buddy.speciesId] = (p.candies[buddy.speciesId] || 0) + cGain;
+        p.stardust += 250;
+        window.PokeAudio.playGotchaFanfare();
+        window.PokeStorage.showToast(`🐾 Seu parceiro ${buddy.name} encontrou +${cGain} Candies e +250 Stardust!`, "success");
       }
     }
-    ctx.restore();
 
-    // 3. Prédios 3D do OpenStreetMap (ou quarteirões urbanos da cidade) em Azul-Claro (#3f569c)
-    ctx.save();
-    ctx.fillStyle = "rgba(68, 92, 162, 0.75)";
-    ctx.strokeStyle = "rgba(110, 145, 220, 0.45)";
-    ctx.lineWidth = 1.5;
-    if (cityState.osmBuildings.length > 0) {
-      for (const b of cityState.osmBuildings) {
-        ctx.beginPath();
-        let started = false;
-        for (const pt of b.pts) {
-          const p = E.projectPoint3D(vp, pt.x, 0.05, pt.z, W, H);
-          if (!p) continue;
-          if (!started) { ctx.moveTo(p.x, p.y); started = true; }
-          else ctx.lineTo(p.x, p.y);
-        }
-        if (started) { ctx.closePath(); ctx.fill(); ctx.stroke(); }
-      }
-    } else {
-      // Quarteirões procedurais quando OpenStreetMap ainda está carregando
-      for (let bz = -2; bz <= 2; ++bz) {
-        for (let bx = -2; bx <= 2; ++bx) {
-          const cx = bx * 9 + 4.5, cz = bz * 9 + 4.5;
-          const corners = [
-            E.projectPoint3D(vp, cx-2.6, 0.05, cz-2.6, W, H),
-            E.projectPoint3D(vp, cx+2.6, 0.05, cz-2.6, W, H),
-            E.projectPoint3D(vp, cx+2.6, 0.05, cz+2.6, W, H),
-            E.projectPoint3D(vp, cx-2.6, 0.05, cz+2.6, W, H)
-          ];
-          if (corners.every(Boolean)) {
-            ctx.beginPath();
-            ctx.moveTo(corners[0].x, corners[0].y);
-            for (let k = 1; k < 4; ++k) ctx.lineTo(corners[k].x, corners[k].y);
-            ctx.closePath(); ctx.fill(); ctx.stroke();
+    // 2. Incubadora de Ovos (2km / 5km / 10km)
+    if (Array.isArray(p.eggs)) {
+      const kmDelta = meters / 1000.0; // Em modo jogo aceleramos 4x para ser divertido testar
+      for (let i = p.eggs.length - 1; i >= 0; --i) {
+        const egg = p.eggs[i];
+        if (!egg.incubating) continue;
+        egg.kmWalked = (egg.kmWalked || 0) + kmDelta * 4.5;
+        if (egg.kmWalked >= egg.kmRequired) {
+          // Chocou o Ovo!
+          p.eggs.splice(i, 1);
+          const hatched = window.PokeData.rollWeightedSpawn(
+            Object.assign({}, cfg, { wildIvFloor: 11, rareSpawnMultiplier: egg.kmRequired >= 10 ? 5.0 : 2.2 }),
+            p.level,
+            p
+          );
+          p.pokemonBox.push(hatched);
+          p.pokedexCaught[hatched.speciesId] = (p.pokedexCaught[hatched.speciesId] || 0) + 1;
+          p.candies[hatched.speciesId] = (p.candies[hatched.speciesId] || 0) + 12;
+          p.stardust += Math.round(egg.kmRequired * 350);
+          window.PokeStorage.addXp(Math.round(egg.kmRequired * 300));
+          window.PokeAudio.playGotchaFanfare();
+          window.PokeStorage.showToast(
+            `🥚 OVO DE ${egg.kmRequired}KM CHOCOU! Nasceu um ${hatched.name} (CP ${hatched.cp}, IV ${hatched.ivPercent}%)!`,
+            "success"
+          );
+          // Coloca o próximo ovo na incubadora infinita automaticamente
+          if (p.eggs.length > 0 && !p.eggs.some(e => e.incubating)) {
+            p.eggs[0].incubating = true;
           }
         }
       }
     }
-    ctx.restore();
+  }
 
-    // 4. Ruas Reais do OpenStreetMap (Borda Salmão/Dourada #8d606a + Interior Azul-Marinho #17255c igual à ref 22.18.13 (2).jpeg!)
-    const drawRoadPolyline = (pts, widthScale, strokeStyle) => {
-      ctx.strokeStyle = strokeStyle;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      for (let i = 0; i + 1 < pts.length; ++i) {
-        const p0 = E.projectPoint3D(vp, pts[i].x, 0.02, pts[i].z, W, H);
-        const p1 = E.projectPoint3D(vp, pts[i+1].x, 0.02, pts[i+1].z, W, H);
-        if (!p0 || !p1) continue;
-        const avgDepth = Math.max(2.5, (p0.depth + p1.depth) * 0.5);
-        ctx.lineWidth = Math.max(4, Math.min(54, (140 / avgDepth) * widthScale));
-        ctx.beginPath();
-        ctx.moveTo(p0.x, p0.y);
-        ctx.lineTo(p1.x, p1.y);
-        ctx.stroke();
-      }
-    };
+  function updateCityMovement(dt) {
+    if (gameScene !== "CITY_MAP") return;
 
-    ctx.save();
-    let roadList = cityState.osmRoads;
-    if (roadList.length === 0) {
-      roadList = [];
-      for (let k = -2; k <= 2; ++k) {
-        roadList.push({ pts: [{x: -24, z: k*9}, {x: 24, z: k*9}] });
-        roadList.push({ pts: [{x: k*9, z: -24}, {x: k*9, z: 24}] });
+    cityState.villainBalloon.x = cityState.playerX + Math.sin(performance.now() * 0.00025) * 8.5;
+    cityState.villainBalloon.z = cityState.playerZ - 7.5 + Math.cos(performance.now() * 0.0002) * 3.5;
+
+    for (const sp of cityState.wildSpawns) {
+      const d = Math.hypot(sp.x - cityState.playerX, sp.z - cityState.playerZ);
+      if (d > 24.0) {
+        const ang = Math.random() * Math.PI * 2;
+        const r = 3.0 + Math.random() * 9.0;
+        sp.x = cityState.playerX + Math.cos(ang) * r;
+        sp.z = cityState.playerZ + Math.sin(ang) * r;
       }
     }
-    for (const r of roadList) drawRoadPolyline(r.pts, 1.28, "#8e626c"); // Meio-fio Salmão Pokémon GO
-    for (const r of roadList) drawRoadPolyline(r.pts, 0.92, "#17255c"); // Asfalto Azul-Marinho
-    ctx.restore();
 
-    // 5. Círculo Branco/Rosa Pulsante no Chão ao redor do seu Avatar (Ref: 22.18.13 (2).jpeg)
-    const avatarScreen = E.projectPoint3D(vp, cityState.playerX, 0, cityState.playerZ, W, H);
-    if (avatarScreen) {
-      const ringEdge = E.projectPoint3D(vp, cityState.playerX + 3.2, 0, cityState.playerZ, W, H);
-      const rx = ringEdge ? Math.hypot(ringEdge.x - avatarScreen.x, ringEdge.y - avatarScreen.y) : 130;
-      ctx.save();
-      ctx.strokeStyle = "rgba(245, 210, 240, 0.82)";
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.ellipse(avatarScreen.x, avatarScreen.y, rx, rx * 0.62, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
+    if (Math.abs(cityState.joyDx) < 0.05 && Math.abs(cityState.joyDz) < 0.05) {
+      cityState.isMoving = false;
+      return;
     }
 
-    // 6. Coleta todos os objetos 3D do Mapa (Avatar, Parceiro, Pokémons Selvagens, PokéStops, Ginásios, Raids, Balão Rocket)
-    // e ordena por profundidade Z (Painter's Algorithm 3D) para oclusão perfeita!
-    const renderQueue = [];
-    const prof = S.getProfile();
+    cityState.isMoving = true;
+    cityState.walkCycle += dt * 9.0;
+    const speed = 5.4;
 
-    // 6a. Seu Avatar 3D no centro
-    if (avatarScreen) {
-      renderQueue.push({
-        depth: avatarScreen.depth,
-        draw: () => draw3DTrainerAvatarOnMap(avatarScreen.x, avatarScreen.y, avatarScreen.depth, prof, timeSec)
+    const sinY = Math.sin(cityState.camOrbitYaw);
+    const cosY = Math.cos(cityState.camOrbitYaw);
+    const worldDx = cityState.joyDx * cosY + cityState.joyDz * sinY;
+    const worldDz = -cityState.joyDx * sinY + cityState.joyDz * cosY;
+
+    cityState.playerX += worldDx * speed * dt;
+    cityState.playerZ += worldDz * speed * dt;
+    cityState.facingYaw = Math.atan2(worldDx, -worldDz);
+
+    onPlayerWalkedMeters(Math.hypot(worldDx, worldDz) * speed * dt * 2.8);
+  }
+
+  // ============================================================================
+  // ZOOM DO MAPA (DE 2.5m ATÉ 55.0m PARA VISÃO ESTRATÉGICA AMPLA!)
+  // ============================================================================
+  function adjustZoom(deltaDist) {
+    if (gameScene !== "CITY_MAP") return;
+    cityState.camOrbitDist = Math.max(2.5, Math.min(55.0, cityState.camOrbitDist + deltaDist));
+  }
+
+  function toggleSceneMode(targetMode) {
+    window.PokeAudio.playUiClick();
+    gameScene = targetMode || (gameScene === "CITY_MAP" ? "AR_CAPTURE" : "CITY_MAP");
+
+    const mapHud = document.getElementById("map-overworld-hud");
+    const arHud = document.getElementById("ar-encounter-hud");
+    const battleHud = document.getElementById("live-battle-hud");
+
+    if (mapHud) mapHud.style.display = gameScene === "CITY_MAP" ? "block" : "none";
+    if (arHud) arHud.style.display = gameScene === "AR_CAPTURE" ? "block" : "none";
+    if (battleHud) battleHud.style.display = gameScene === "LIVE_BATTLE" ? "block" : "none";
+
+    if (gameScene === "AR_CAPTURE" && !wildMon) {
+      spawnWildPokemon();
+    }
+    updateHud();
+  }
+
+  function startWildEncounterFromMap(spawnIndex) {
+    const entry = cityState.wildSpawns[spawnIndex];
+    if (!entry) return;
+    wildMon = entry.mon;
+    cityState.wildSpawns.splice(spawnIndex, 1);
+    setTimeout(refreshCityWildSpawns, 1500);
+
+    activeBerry = null;
+    resetBall();
+    anchorWildPokemonInFront();
+    toggleSceneMode("AR_CAPTURE");
+    window.PokeAudio.playPokemonCry(wildMon.speciesId);
+
+    const shinyTag = wildMon.isShiny ? "✨ SHINY " : "";
+    window.PokeStorage.showToast(
+      `🌿 Um ${shinyTag}${wildMon.name} selvagem (CP ${wildMon.cp}) apareceu em ASCII 3D!`,
+      wildMon.isShiny ? "warn" : "info"
+    );
+  }
+
+  function spawnWildPokemon(forceSpeciesId = null, isRaidReward = false) {
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+    if (forceSpeciesId) {
+      const ivF = isRaidReward ? cfg.raidIvFloor : cfg.wildIvFloor;
+      const sp = window.PokeData.getSpecies(forceSpeciesId);
+      const ivA = ivF + Math.floor(Math.random() * (16 - ivF));
+      const ivD = ivF + Math.floor(Math.random() * (16 - ivF));
+      const ivS = ivF + Math.floor(Math.random() * (16 - ivF));
+      const lvl = Math.min(50, Math.max(10, p.level + 2));
+      wildMon = {
+        uid: "mon_" + Date.now() + "_" + Math.floor(Math.random() * 9999),
+        speciesId: sp.id,
+        name: sp.name,
+        level: lvl,
+        ivAtk: ivA, ivDef: ivD, ivSta: ivS,
+        ivPercent: Math.round(((ivA + ivD + ivS) / 45) * 100),
+        isShiny: Math.random() < (cfg.shinyProbability * (isRaidReward ? 5 : 1)),
+        cp: window.PokeData.calculateCP(sp.id, lvl, ivA, ivD, ivS),
+        maxHp: window.PokeData.calculateMaxHP(sp.id, lvl, ivS),
+        hp: window.PokeData.calculateMaxHP(sp.id, lvl, ivS),
+        fastMove: sp.fastMoves[0],
+        chargedMove: sp.chargedMoves[0],
+        scaleVariation: 1.0,
+        caughtAt: Date.now()
+      };
+    } else {
+      wildMon = window.PokeData.rollWeightedSpawn(cfg, p.level, p);
+    }
+
+    E.getPokemonMesh(wildMon.speciesId, wildMon.isShiny);
+    activeBerry = null;
+    resetBall();
+    anchorWildPokemonInFront();
+    window.PokeAudio.playPokemonCry(wildMon.speciesId);
+    updateHud();
+  }
+
+  function anchorWildPokemonInFront() {
+    const dist = 4.5;
+    wildAnchor.x = camPos.x - Math.sin(camYaw) * dist;
+    wildAnchor.y = -1.10;
+    wildAnchor.z = camPos.z - Math.cos(camYaw) * dist;
+    anchorLocked = true;
+  }
+
+  function resetBall() {
+    ball.state = 0;
+    ball.pos = { x: 0, y: -0.55, z: -1.35 };
+    ball.vel = { x: 0, y: 0, z: 0 };
+    ball.spinRpm = 0;
+    ball.curveDir = 0;
+    ball.lidOpenAngle = 0;
+    ball.morphProgress = 0;
+    ball.shakeCount = 0;
+    ball.shakeTimer = 0;
+    ball.isDraggingBall = false;
+  }
+
+  async function toggleRealCamera() {
+    window.PokeAudio.playUiClick();
+    const btn = document.getElementById("btn-ar-cam");
+    if (useRealCamera) {
+      useRealCamera = false;
+      if (videoEl && videoEl.srcObject) {
+        videoEl.srcObject.getTracks().forEach(t => t.stop());
+        videoEl.srcObject = null;
+      }
+      if (btn) btn.textContent = "📷 AR+ Câmera";
+      window.PokeStorage.showToast("🏞️ Fundo 3D ASCII Virtual ativado.", "info");
+      return;
+    }
+
+    const ok = await E.startCameraOnVideoElement(videoEl, (msg, status, httpsUrl) => {
+      window.PokeStorage.showToast(msg, status === "ok" ? "success" : "warn");
+      if (status === "https_required" && httpsUrl) {
+        setTimeout(() => {
+          if (confirm("O iPhone/iOS exige conexão HTTPS segura para abrir a câmera.\nDeseja abrir a porta HTTPS (:8443) agora?")) {
+            window.location.href = httpsUrl;
+          }
+        }, 400);
+      }
+    });
+
+    if (ok) {
+      useRealCamera = true;
+      if (btn) btn.textContent = "📷 AR+ ON";
+      if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === "function") {
+        DeviceOrientationEvent.requestPermission().then(state => {
+          if (state === "granted") attachGyroListener();
+        }).catch(() => {});
+      } else {
+        attachGyroListener();
+      }
+    }
+  }
+
+  let gyroAttached = false;
+  function attachGyroListener() {
+    if (gyroAttached) return;
+    gyroAttached = true;
+    window.addEventListener("deviceorientation", (e) => {
+      if (e.alpha !== null && e.beta !== null && gameScene === "AR_CAPTURE") {
+        camYaw = (e.alpha * Math.PI / 180) * 0.35;
+        camPitch = Math.max(-0.6, Math.min(0.6, ((e.beta - 65) * Math.PI / 180) * 0.45));
+      }
+    });
+  }
+
+  // ============================================================================
+  // DISTÂNCIA PONTO-SEGMENTO PARA RUAS OPENSTREETMAP NO RAYCAST DO CHÃO 3D ASCII
+  // ============================================================================
+  function distToSegmentSq(px, pz, ax, az, bx, bz) {
+    const l2 = (bx - ax) * (bx - ax) + (bz - az) * (bz - az);
+    if (l2 === 0) return (px - ax) * (px - ax) + (pz - az) * (pz - az);
+    let t = ((px - ax) * (bx - ax) + (pz - az) * (bz - az)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    const qx = ax + t * (bx - ax);
+    const qz = az + t * (bz - az);
+    return (px - qx) * (px - qx) + (pz - qz) * (pz - qz);
+  }
+
+  // ============================================================================
+  // ESTÁGIO 1 DO PIPELINE 100% ASCII: FUNDO / CÂMERA AO VIVO / CHÃO 3D + SOBEL
+  // ============================================================================
+  function captureCameraAndComputeSobel(timeSec, activeCamPos, activeYaw, activePitch) {
+    if (useRealCamera && gameScene === "AR_CAPTURE" && videoEl && videoEl.readyState >= 2) {
+      sampleCtx.drawImage(videoEl, 0, 0, cols, rows);
+      const img = sampleCtx.getImageData(0, 0, cols, rows).data;
+      for (let i = 0, p = 0; i < cols * rows; ++i, p += 4) {
+        const r = img[p] / 255, g = img[p + 1] / 255, b = img[p + 2] / 255;
+        camR[i] = r; camG[i] = g; camB[i] = b;
+        camLuma[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+      }
+    } else if (gameScene === "EVOLUTION_CUTSCENE") {
+      // Câmara Cósmica 3D de Evolução em ASCII
+      for (let r = 0; r < rows; ++r) {
+        const ny = r / rows;
+        for (let c = 0; c < cols; ++c) {
+          const idx = r * cols + c;
+          const nx = (c / cols) - 0.5;
+          const beam = Math.exp(-nx * nx * 14.0) * (0.45 + 0.25 * Math.sin(ny * 22 - timeSec * 8));
+          const wave = 0.08 * Math.sin(c * 0.35 + timeSec * 4) * Math.cos(r * 0.3 - timeSec * 3);
+          const R = Math.min(1, 0.06 + beam * 0.45 + wave);
+          const G = Math.min(1, 0.14 + beam * 0.85 + Math.max(0, wave));
+          const B = Math.min(1, 0.32 + beam * 1.10);
+          camR[idx] = R; camG[idx] = G; camB[idx] = B;
+          camLuma[idx] = 0.299 * R + 0.587 * G + 0.114 * B;
+        }
+      }
+    } else {
+      // Raycast 3D do Céu e do Chão (Mapa GPS Pokémon GO, Parque AR ou Estádio de Batalha 3D)
+      const groundY = -1.25;
+      const fovScale = Math.tan((55 * Math.PI / 180) * 0.5);
+      const aspect = (cols * cellW) / (rows * cellH);
+      const cosP = Math.cos(activePitch), sinP = Math.sin(activePitch);
+      const cosY = Math.cos(activeYaw), sinY = Math.sin(activeYaw);
+
+      for (let r = 0; r < rows; ++r) {
+        const ndcY = 1.0 - 2.0 * ((r + 0.5) / rows);
+        for (let c = 0; c < cols; ++c) {
+          const idx = r * cols + c;
+          const ndcX = (2.0 * ((c + 0.5) / cols) - 1.0) * aspect;
+
+          const vx = ndcX * fovScale;
+          const vy = ndcY * fovScale;
+          const vz = -1.0;
+
+          const ry1 = vy * cosP - vz * sinP;
+          const rz1 = vy * sinP + vz * cosP;
+          const rxW = vx * cosY + rz1 * sinY;
+          const ryW = ry1;
+          const rzW = -vx * sinY + rz1 * cosY;
+
+          if (ryW >= -0.01) {
+            // Céu Crepuscular Pokémon GO (Ref: 22.18.13 (2).jpeg)
+            const skyT = Math.min(1, Math.max(0, ryW * 2.2));
+            let R = 0.82 * (1 - skyT) + 0.18 * skyT;
+            let G = 0.52 * (1 - skyT) + 0.25 * skyT;
+            let B = 0.58 * (1 - skyT) + 0.55 * skyT;
+            if (gameScene === "LIVE_BATTLE") {
+              // Luzes de Estádio de Batalha no Horizonte
+              const stadiumGlow = Math.max(0, Math.sin(c * 0.22 + timeSec * 2)) * (1 - skyT) * 0.25;
+              R += stadiumGlow; G += stadiumGlow * 0.8; B += stadiumGlow * 1.2;
+            }
+            camR[idx] = Math.min(1, R);
+            camG[idx] = Math.min(1, G);
+            camB[idx] = Math.min(1, B);
+            camLuma[idx] = 0.299 * R + 0.587 * G + 0.114 * B;
+          } else {
+            const tHit = (groundY - activeCamPos.y) / ryW;
+            const wx = activeCamPos.x + rxW * tHit;
+            const wz = activeCamPos.z + rzW * tHit;
+            const fog = Math.exp(-Math.max(0, tHit) * 0.022);
+
+            if (gameScene === "CITY_MAP") {
+              // Paleta Oficial do Mapa Noturno Pokémon GO (Ref: 22.18.13 (2).jpeg)
+              let gR = 0.14, gG = 0.21, gB = 0.47; // Terreno Índigo (#243678)
+              const checker = ((Math.floor(wx * 0.5) + Math.floor(wz * 0.5)) & 1);
+              if (checker) { gR += 0.025; gG += 0.03; gB += 0.05; }
+
+              let isRoad = false, isCurb = false, isBuilding = false;
+
+              if (cityState.osmRoads.length > 0) {
+                for (let ri = 0; ri < cityState.osmRoads.length; ++ri) {
+                  const road = cityState.osmRoads[ri];
+                  const hwSq = road.halfW * road.halfW;
+                  const curbSq = (road.halfW + 0.35) * (road.halfW + 0.35);
+                  for (let pi = 0; pi < road.pts.length - 1; ++pi) {
+                    const dSq = distToSegmentSq(wx, wz, road.pts[pi].x, road.pts[pi].z, road.pts[pi + 1].x, road.pts[pi + 1].z);
+                    if (dSq < hwSq) { isRoad = true; break; }
+                    if (dSq < curbSq) { isCurb = true; }
+                  }
+                  if (isRoad) break;
+                }
+                if (!isRoad) {
+                  for (let bi = 0; bi < cityState.osmBuildings.length; ++bi) {
+                    const b = cityState.osmBuildings[bi];
+                    if (wx >= b.minX && wx <= b.maxX && wz >= b.minZ && wz <= b.maxZ) {
+                      isBuilding = true; break;
+                    }
+                  }
+                }
+              } else {
+                // Quarteirões urbanos procedurais com avenidas, meio-fio salmão e prédios
+                const roadX = Math.abs((wx % 12 + 12) % 12 - 6);
+                const roadZ = Math.abs((wz % 12 + 12) % 12 - 6);
+                if (roadX < 1.35 || roadZ < 1.35) {
+                  isRoad = true;
+                } else if (roadX < 1.68 || roadZ < 1.68) {
+                  isCurb = true;
+                } else if (roadX > 2.7 && roadX < 4.9 && roadZ > 2.7 && roadZ < 4.9) {
+                  isBuilding = true;
+                }
+              }
+
+              if (isRoad) {
+                // Asfalto Azul-Marinho Escuro (#17255c)
+                gR = 0.09; gG = 0.15; gB = 0.36;
+              } else if (isCurb) {
+                // Meio-Fio Salmão/Dourado do Pokémon GO (#8e626c)
+                gR = 0.56; gG = 0.38; gB = 0.42;
+              } else if (isBuilding) {
+                // Pegada de Edifício 3D (#3f569c)
+                gR = 0.25; gG = 0.34; gB = 0.61;
+              }
+
+              camR[idx] = gR * fog + 0.28 * (1 - fog);
+              camG[idx] = gG * fog + 0.28 * (1 - fog);
+              camB[idx] = gB * fog + 0.48 * (1 - fog);
+            } else if (gameScene === "LIVE_BATTLE") {
+              // Piso 3D do Estádio de Batalha Ao Vivo (Linhas de Arena Ciano/Ouro)
+              const arenaRing = Math.abs(Math.hypot(wx, wz + 3.8) - 3.2) < 0.22;
+              const centerLine = Math.abs(wz + 3.8) < 0.12 && Math.abs(wx) < 3.4;
+              let gR = 0.10, gG = 0.18, gB = 0.34;
+              if (arenaRing || centerLine) {
+                gR = 0.25; gG = 0.85; gB = 0.78;
+              } else if (((Math.floor(wx) + Math.floor(wz)) & 1) === 0) {
+                gR = 0.13; gG = 0.22; gB = 0.40;
+              }
+              camR[idx] = gR * fog + 0.15 * (1 - fog);
+              camG[idx] = gG * fog + 0.22 * (1 - fog);
+              camB[idx] = gB * fog + 0.38 * (1 - fog);
+            } else {
+              // Gramado 3D do Modo Encontro de Captura AR
+              const gx = Math.floor(wx * 1.4), gz = Math.floor(wz * 1.4);
+              const checker = ((gx + gz) & 1) ? 0.18 : 0.13;
+              const gR = (checker * 0.42) * fog + 0.15 * (1 - fog);
+              const gG = (checker * 1.40) * fog + 0.32 * (1 - fog);
+              const gB = (checker * 0.68) * fog + 0.35 * (1 - fog);
+              camR[idx] = gR; camG[idx] = gG; camB[idx] = gB;
+            }
+            camLuma[idx] = 0.299 * camR[idx] + 0.587 * camG[idx] + 0.114 * camB[idx];
+          }
+        }
+      }
+    }
+
+    // Filtro Sobel 3x3 no fundo para caracteres direcionais (| - / \)
+    edgeMag.fill(0);
+    edgeDir.fill(0);
+    for (let r = 1; r < rows - 1; ++r) {
+      for (let c = 1; c < cols - 1; ++c) {
+        const i = r * cols + c;
+        const gx = -camLuma[i - cols - 1] + camLuma[i - cols + 1]
+                   - 2 * camLuma[i - 1]   + 2 * camLuma[i + 1]
+                   - camLuma[i + cols - 1] + camLuma[i + cols + 1];
+        const gy = -camLuma[i - cols - 1] - 2 * camLuma[i - cols] - camLuma[i - cols + 1]
+                   + camLuma[i + cols - 1] + 2 * camLuma[i + cols] + camLuma[i + cols + 1];
+        const mag = Math.hypot(gx, gy);
+        edgeMag[i] = mag;
+        if (mag > 0.15) {
+          const deg = ((Math.atan2(gy, gx) * 180 / Math.PI) + 180) % 180;
+          if (deg < 22.5 || deg >= 157.5) edgeDir[i] = 1;      // '|'
+          else if (deg >= 67.5 && deg < 112.5) edgeDir[i] = 2; // '-'
+          else if (deg >= 22.5 && deg < 67.5) edgeDir[i] = 3;  // '/'
+          else edgeDir[i] = 4;                                 // '\'
+        }
+      }
+    }
+  }
+
+  // ============================================================================
+  // ESTÁGIO 2 DO PIPELINE 100% ASCII: RASTERIZADOR 3D G-BUFFER + SOBEL 3D
+  // ============================================================================
+  function rasterize3DScene(timeSec) {
+    const n = cols * rows;
+    gbZ.fill(Infinity);
+    gbId.fill(0);
+
+    let activeCamPos = camPos;
+    let activeYaw = camYaw;
+    let activePitch = camPitch;
+
+    if (gameScene === "CITY_MAP") {
+      const dist = cityState.camOrbitDist;
+      const pitch = cityState.camOrbitPitch;
+      const yaw = cityState.camOrbitYaw;
+      activeCamPos = {
+        x: cityState.playerX + Math.sin(yaw) * Math.cos(pitch) * dist,
+        y: -1.25 + Math.sin(pitch) * dist,
+        z: cityState.playerZ + Math.cos(yaw) * Math.cos(pitch) * dist
+      };
+      activeYaw = yaw;
+      activePitch = -pitch * 0.85;
+    } else if (gameScene === "LIVE_BATTLE") {
+      // Câmera cinematográfica 3D atrás do ombro do Pokémon do jogador olhando para o Boss
+      activeCamPos = { x: 0.45, y: 0.45, z: 0.35 };
+      activeYaw = 0.08;
+      activePitch = -0.18;
+    } else if (gameScene === "EVOLUTION_CUTSCENE") {
+      activeCamPos = { x: 0.0, y: 0.15, z: 0.0 };
+      activeYaw = 0.0;
+      activePitch = -0.05;
+    }
+
+    captureCameraAndComputeSobel(timeSec, activeCamPos, activeYaw, activePitch);
+
+    const aspect = (cols * cellW) / (rows * cellH);
+    const view = E.mat4View6DoF(activeCamPos, activeYaw, activePitch, camRoll);
+    // zFar = 160.0 para suportar zoom distante de até 55m sem cortar nenhum modelo 3D!
+    const proj = E.mat4Perspective(55 * Math.PI / 180, aspect, 0.25, 160.0);
+    const vp = E.mat4Mul(proj, view);
+
+    const drawCmds = [];
+    projectedClickTargets = [];
+
+    if (gameScene === "CITY_MAP") {
+      const p = window.PokeStorage.getProfile();
+
+      // 1. ANEL 3D DE RAIO DE AÇÃO INVARIANTE À ROTAÇÃO DA CÂMERA (3.5m de raio no plano Y=-1.24)
+      // Como é uma malha 3D real no G-Buffer, girar a câmera 360° nunca altera o tamanho do raio!
+      drawCmds.push({
+        id: 7,
+        mesh: E.buildAnchorRingMesh(3.5, 0.13, 36),
+        model: E.mat4Translation(cityState.playerX, -1.24, cityState.playerZ)
       });
-    }
+      // Anel interno nos pés do treinador (0.75m)
+      drawCmds.push({
+        id: 7,
+        mesh: E.buildAnchorRingMesh(0.75, 0.07, 24),
+        model: E.mat4Translation(cityState.playerX, -1.23, cityState.playerZ)
+      });
 
-    // 6b. Seu Pokémon Parceiro (Buddy) caminhando ao lado do Avatar
-    const buddyPk = prof.pokemonBox.find(p => p.uid === prof.buddyUid) || prof.pokemonBox[0];
-    if (buddyPk) {
-      const bx = cityState.playerX - Math.sin(cityState.facingYaw - 0.6) * 1.25;
-      const bz = cityState.playerZ + Math.cos(cityState.facingYaw - 0.6) * 1.25;
-      const bp = E.projectPoint3D(vp, bx, 0, bz, W, H);
-      if (bp) {
-        renderQueue.push({
-          depth: bp.depth,
-          draw: () => draw3DPokemonOnMap(bp.x, bp.y, bp.depth, buddyPk.speciesId, buddyPk.isShiny, 0.85, timeSec, true)
+      // 2. AVATAR 3D DO TREINADOR NO CENTRO DO MAPA
+      const avatarMesh = E.buildTrainerAvatarMesh(p.gender, p.avatar, cityState.walkCycle, cityState.isMoving);
+      const mAvatar = E.mat4Mul(
+        E.mat4Translation(cityState.playerX, -1.25, cityState.playerZ),
+        E.mat4Mul(E.mat4RotY(cityState.facingYaw + Math.PI), E.mat4Scale(0.95, 0.95, 0.95))
+      );
+      drawCmds.push({ id: 10, mesh: avatarMesh, model: mAvatar });
+
+      // 3. POKÉMON PARCEIRO (BUDDY) CAMINHANDO AO SEU LADO EM 3D
+      const buddyMon = p.pokemonBox.find(m => m.uid === p.buddyUid) || p.pokemonBox[0];
+      if (buddyMon) {
+        const bMesh = E.getPokemonMesh(buddyMon.speciesId, buddyMon.isShiny);
+        const bx = cityState.playerX - Math.cos(cityState.facingYaw) * 1.15;
+        const bz = cityState.playerZ - Math.sin(cityState.facingYaw) * 1.15;
+        const by = -1.22 + Math.abs(Math.sin(timeSec * 5.0)) * 0.12;
+        const mBuddy = E.mat4Mul(
+          E.mat4Translation(bx, by, bz),
+          E.mat4Mul(E.mat4RotY(cityState.facingYaw + Math.PI), E.mat4Scale(0.55, 0.55, 0.55))
+        );
+        drawCmds.push({ id: 11, mesh: bMesh, model: mBuddy, speciesId: buddyMon.speciesId });
+      }
+
+      // 4. POKÉSTOPS 3D
+      const psMesh = E.buildPokestop3DMesh();
+      cityState.pokestops.forEach((ps, idx) => {
+        const mPs = E.mat4Mul(
+          E.mat4Translation(ps.x, -1.25, ps.z),
+          E.mat4RotY(timeSec * 1.4 + idx)
+        );
+        drawCmds.push({ id: 20 + idx, mesh: psMesh, model: mPs });
+        const pt = E.projectPoint3D(vp, ps.x, 0.25, ps.z, canvas.width, canvas.height);
+        if (pt) {
+          projectedClickTargets.push({
+            type: "POKESTOP", index: idx, x: pt.x, y: pt.y, r: 44,
+            label: `🔵 ${ps.name}`,
+            sub: Date.now() < ps.cooldownUntil ? "⏳ Recarregando" : "Toque p/ Girar"
+          });
+        }
+      });
+
+      // 5. GINÁSIOS 3D + GUARDIÃO 3D NO TOPO + BOSS DE RAID
+      cityState.gyms.forEach((gym, idx) => {
+        const gMesh = E.buildGymTower3DMesh(gym.color);
+        const mGym = E.mat4Mul(
+          E.mat4Translation(gym.x, -1.25, gym.z),
+          E.mat4RotY(timeSec * 0.5 + idx)
+        );
+        drawCmds.push({ id: 30 + idx, mesh: gMesh, model: mGym });
+
+        const guardMesh = E.getPokemonMesh(gym.guardSpeciesId, false);
+        const mGuard = E.mat4Mul(
+          E.mat4Translation(gym.x, 1.45 + Math.sin(timeSec * 2.5) * 0.12, gym.z),
+          E.mat4Mul(E.mat4RotY(timeSec * 1.2), E.mat4Scale(0.85, 0.85, 0.85))
+        );
+        drawCmds.push({ id: 35 + idx, mesh: guardMesh, model: mGuard, speciesId: gym.guardSpeciesId });
+
+        const pt = E.projectPoint3D(vp, gym.x, 1.5, gym.z, canvas.width, canvas.height);
+        if (pt) {
+          projectedClickTargets.push({
+            type: "GYM", index: idx, x: pt.x, y: pt.y, r: 54,
+            label: `🏟️ ${gym.name}`,
+            sub: `Equipe ${gym.team} • Lutar / Raid`
+          });
+        }
+      });
+
+      // 6. BALÃO 3D DOS VILÕES (TEAM ROCKET CYBER)
+      if (cityState.villainBalloon.active) {
+        const vMesh = E.buildVillainBalloon3DMesh();
+        const by = cityState.villainBalloon.y + Math.sin(timeSec * 1.8) * 0.25;
+        const mBalloon = E.mat4Mul(
+          E.mat4Translation(cityState.villainBalloon.x, by, cityState.villainBalloon.z),
+          E.mat4RotY(timeSec * 0.7)
+        );
+        drawCmds.push({ id: 45, mesh: vMesh, model: mBalloon });
+        const pt = E.projectPoint3D(vp, cityState.villainBalloon.x, by, cityState.villainBalloon.z, canvas.width, canvas.height);
+        if (pt) {
+          projectedClickTargets.push({
+            type: "VILLAIN", index: 0, x: pt.x, y: pt.y, r: 48,
+            label: "🚀 Balão Equipe Cyber",
+            sub: "Toque p/ Duelo Ao Vivo!"
+          });
+        }
+      }
+
+      // 7. POKÉMONS SELVAGENS 3D EM VOLTA DO TREINADOR NO MAPA + ANEL DE CHÃO 3D
+      const spawnRingMesh = E.buildAnchorRingMesh(0.85, 0.08, 20);
+      cityState.wildSpawns.forEach((sp, idx) => {
+        const wMesh = E.getPokemonMesh(sp.mon.speciesId, sp.mon.isShiny);
+        const sScale = Math.min(1.15, Math.max(0.55, E.computeVisualScale(sp.mon.speciesId, sp.mon.scaleVariation) * 0.65));
+        const hop = Math.abs(Math.sin(timeSec * 3.5 + idx)) * 0.14;
+        const mWild = E.mat4Mul(
+          E.mat4Translation(sp.x, -1.20 + hop, sp.z),
+          E.mat4Mul(E.mat4RotY(sp.rotY + Math.sin(timeSec + idx) * 0.4), E.mat4Scale(sScale, sScale, sScale))
+        );
+        drawCmds.push({ id: 50 + idx, mesh: wMesh, model: mWild, speciesId: sp.mon.speciesId });
+        drawCmds.push({ id: 7, mesh: spawnRingMesh, model: E.mat4Translation(sp.x, -1.24, sp.z) });
+
+        const pt = E.projectPoint3D(vp, sp.x, -0.45, sp.z, canvas.width, canvas.height);
+        if (pt) {
+          projectedClickTargets.push({
+            type: "WILD", index: idx, x: pt.x, y: pt.y, r: 44,
+            label: `${sp.mon.isShiny ? "✨" : ""}${sp.mon.name}`,
+            sub: `CP ${sp.mon.cp}`
+          });
+        }
+      });
+
+    } else if (gameScene === "AR_CAPTURE" && wildMon) {
+      // MODO ENCONTRO DE CAPTURA 100% EM ASCII 3D
+      const sp = window.PokeData.getSpecies(wildMon.speciesId);
+      const baseScale = E.computeVisualScale(wildMon.speciesId, wildMon.scaleVariation);
+
+      // 1. Anel de Ancoragem 3D no chão sob o Pokémon
+      drawCmds.push({
+        id: 2,
+        mesh: E.buildAnchorRingMesh(1.15, 0.09, 28),
+        model: E.mat4Translation(wildAnchor.x, wildAnchor.y, wildAnchor.z)
+      });
+
+      // 2. Animação do Pokémon 3D (Normal, Entrando na Pokébola em state=2, ou Saindo em state=5)
+      if (ball.state !== 3 && ball.state !== 4) {
+        let monX = wildAnchor.x;
+        let monY = wildAnchor.y + (sp.types.includes("Flying") ? 0.45 + 0.18 * Math.sin(timeSec * 3.2) : Math.abs(Math.sin(timeSec * 2.6)) * 0.12);
+        let monZ = wildAnchor.z;
+        let morphScale = baseScale;
+        let forceRedEnergy = false;
+
+        if (ball.state === 2) {
+          // ENTRANDO NA POKÉBOLA: O Pokémon encolhe em energia vermelha e voa para dentro da Pokébola aberta!
+          const t = Math.min(1, ball.morphProgress);
+          monX = wildAnchor.x * (1 - t) + ball.pos.x * t;
+          monY = monY * (1 - t) + ball.pos.y * t;
+          monZ = wildAnchor.z * (1 - t) + ball.pos.z * t;
+          morphScale = baseScale * Math.max(0.08, 1.0 - t * 0.92);
+          forceRedEnergy = true;
+        } else if (ball.state === 5) {
+          // SAINDO DA POKÉBOLA (BREAKOUT): Emerge de dentro da Pokébola aberta no chão de volta à posição 3D!
+          const t = Math.min(1, ball.morphProgress);
+          monX = ball.pos.x * (1 - t) + wildAnchor.x * t;
+          monY = ball.pos.y * (1 - t) + monY * t;
+          monZ = ball.pos.z * (1 - t) + wildAnchor.z * t;
+          morphScale = baseScale * (0.08 + 0.92 * t);
+          forceRedEnergy = t < 0.45;
+        }
+
+        const monRotY = Math.sin(timeSec * 1.3) * 0.32 + (ball.state === 2 ? ball.morphProgress * 8.0 : 0);
+        const mMon = E.mat4Mul(
+          E.mat4Translation(monX, monY, monZ),
+          E.mat4Mul(E.mat4RotY(monRotY), E.mat4Scale(morphScale, morphScale, morphScale))
+        );
+        drawCmds.push({
+          id: 1,
+          mesh: E.getPokemonMesh(wildMon.speciesId, wildMon.isShiny),
+          model: mMon,
+          speciesId: wildMon.speciesId,
+          tintRedLaser: forceRedEnergy
+        });
+
+        // Projeta a caixa 2D real do Pokémon 3D para o Anel de Captura cobrir o diâmetro do monstro!
+        const centerPt = E.projectPoint3D(vp, monX, monY + 0.55 * baseScale, monZ, canvas.width, canvas.height);
+        const topPt = E.projectPoint3D(vp, monX, monY + 1.15 * baseScale, monZ, canvas.width, canvas.height);
+        if (centerPt && topPt) {
+          lastWildScreenBox.x = centerPt.x;
+          lastWildScreenBox.y = centerPt.y;
+          lastWildScreenBox.radiusPx = Math.max(72, Math.min(185, Math.abs(centerPt.y - topPt.y) * 1.45));
+        }
+      }
+
+      // 3. Pokébola 3D Articulada (A tampa superior abre em 3D quando ball.lidOpenAngle > 0!)
+      const bScale = 0.25;
+      const wobbleZ = ball.state === 3 ? Math.sin(ball.shakeTimer * 20) * 0.38 : 0;
+      const mBall = E.mat4Mul(
+        E.mat4Translation(ball.pos.x, ball.pos.y, ball.pos.z),
+        E.mat4Mul(
+          E.mat4RotZ(wobbleZ),
+          E.mat4Mul(E.mat4RotY(ball.rotAngle), E.mat4Scale(bScale, bScale, bScale))
+        )
+      );
+      drawCmds.push({
+        id: 3,
+        mesh: E.buildPokeballMesh(activeBallType, ball.lidOpenAngle),
+        model: mBall
+      });
+
+    } else if (gameScene === "LIVE_BATTLE" && liveBattle.active) {
+      // ARENA DE BATALHA 3D AO VIVO 100% EM ASCII!
+      const now = performance.now();
+      const pMon = liveBattle.playerMon;
+      const eMon = liveBattle.enemyMon;
+
+      // 1. Pokémon Inimigo / Raid Boss 3D ao fundo da arena
+      if (eMon) {
+        const eAttackT = now < liveBattle.enemyAttackAnimUntil ? Math.sin(((liveBattle.enemyAttackAnimUntil - now) / 360) * Math.PI) : 0;
+        const eScale = E.computeVisualScale(eMon.speciesId, 1.0) * (liveBattle.isRaidEncounter ? 1.25 : 0.95);
+        const ex = 0.55 - eAttackT * 0.35;
+        const ey = -1.10 + Math.abs(Math.sin(timeSec * 3.0)) * 0.10 + eAttackT * 0.25;
+        const ez = -5.2 + eAttackT * 1.35;
+        const mEnemy = E.mat4Mul(
+          E.mat4Translation(ex, ey, ez),
+          E.mat4Mul(E.mat4RotY(-0.25), E.mat4Scale(eScale, eScale, eScale))
+        );
+        drawCmds.push({
+          id: 61,
+          mesh: E.getPokemonMesh(eMon.speciesId, eMon.isShiny),
+          model: mEnemy,
+          speciesId: eMon.speciesId
+        });
+        drawCmds.push({
+          id: 7,
+          mesh: E.buildAnchorRingMesh(1.35, 0.10, 28),
+          model: E.mat4Translation(ex, -1.24, ez)
+        });
+      }
+
+      // 2. Pokémon do Jogador 3D em primeiro plano (com investida 3D e esquiva lateral 3D!)
+      if (pMon) {
+        const pAttackT = now < liveBattle.playerAttackAnimUntil ? Math.sin(((liveBattle.playerAttackAnimUntil - now) / 280) * Math.PI) : 0;
+        const dodgeX = now < liveBattle.dodgeUntil ? liveBattle.dodgeOffsetX : 0;
+        const pScale = E.computeVisualScale(pMon.speciesId, 1.0) * 0.88;
+        const px = -0.55 + dodgeX * 1.35 + pAttackT * 0.45;
+        const py = -1.15 + Math.abs(Math.sin(timeSec * 3.6)) * 0.08 + pAttackT * 0.22;
+        const pz = -2.45 - pAttackT * 1.15;
+        const mPlayer = E.mat4Mul(
+          E.mat4Translation(px, py, pz),
+          E.mat4Mul(E.mat4RotY(Math.PI - 0.35), E.mat4Scale(pScale, pScale, pScale))
+        );
+        drawCmds.push({
+          id: 60,
+          mesh: E.getPokemonMesh(pMon.speciesId, pMon.isShiny),
+          model: mPlayer,
+          speciesId: pMon.speciesId
+        });
+        drawCmds.push({
+          id: 7,
+          mesh: E.buildAnchorRingMesh(1.10, 0.09, 24),
+          model: E.mat4Translation(px, -1.24, pz)
+        });
+
+        // Escudo 3D se ativo
+        if (now < liveBattle.shieldActiveUntil) {
+          drawCmds.push({
+            id: 7,
+            mesh: E.buildAnchorRingMesh(1.45, 0.22, 28),
+            model: E.mat4Translation(px, -0.55, pz)
+          });
+        }
+      }
+
+    } else if (gameScene === "EVOLUTION_CUTSCENE" && evoScene.active) {
+      // CUTSCENE 3D DE EVOLUÇÃO COM MORPH DE SILHUETA 100% EM ASCII!
+      const elapsed = (performance.now() - evoScene.startTime) / 1000.0;
+      const progress = Math.min(1.0, elapsed / evoScene.durationSec);
+
+      // Pedestal 3D de Energia
+      drawCmds.push({
+        id: 7,
+        mesh: E.buildAnchorRingMesh(1.45, 0.14, 32),
+        model: E.mat4Translation(0, -1.15, -4.2)
+      });
+
+      const rotY = timeSec * (1.5 + progress * 5.0);
+      if (progress < 0.80) {
+        // Fase de Morph 3D: oscila e interpola entre a malha 3D antiga e a malha 3D evoluída!
+        const t = progress / 0.80;
+        const freq = 3.0 + t * t * 38.0;
+        const blend = 0.5 + 0.5 * Math.sin(elapsed * freq);
+        const showNew = blend > (1.0 - t * 0.9);
+        const activeSpeciesId = showNew ? evoScene.toSpeciesId : evoScene.fromSpeciesId;
+        const pulseScale = E.computeVisualScale(activeSpeciesId, 1.0) * (0.95 + 0.22 * Math.sin(elapsed * freq * 1.3));
+        const mEvo = E.mat4Mul(
+          E.mat4Translation(0, -1.05 + t * 0.25, -4.2),
+          E.mat4Mul(E.mat4RotY(rotY), E.mat4Scale(pulseScale, pulseScale, pulseScale))
+        );
+        drawCmds.push({
+          id: 70,
+          mesh: E.getPokemonMesh(activeSpeciesId, false),
+          model: mEvo,
+          speciesId: activeSpeciesId,
+          tintEvolutionMorph: t > 0.12 // Brilho de silhueta 3D branca/ciano durante o morph!
+        });
+      } else {
+        // Revelação Final do Pokémon 3D Evoluído em Cores Completas!
+        const finalScale = E.computeVisualScale(evoScene.toSpeciesId, 1.0) * 1.15;
+        const mFinal = E.mat4Mul(
+          E.mat4Translation(0, -1.05, -4.2),
+          E.mat4Mul(E.mat4RotY(Math.sin(timeSec * 1.6) * 0.35), E.mat4Scale(finalScale, finalScale, finalScale))
+        );
+        drawCmds.push({
+          id: 71,
+          mesh: E.getPokemonMesh(evoScene.toSpeciesId, false),
+          model: mFinal,
+          speciesId: evoScene.toSpeciesId
         });
       }
     }
 
-    // 6c. Todos os Pokémons Selvagens em 3D ao redor do Avatar no Mapa!
-    for (let i = 0; i < wildSpawns.length; ++i) {
-      const w = wildSpawns[i];
-      const wp = E.projectPoint3D(vp, w.mapX, 0, w.mapZ, W, H);
-      if (!wp) continue;
-      renderQueue.push({
-        depth: wp.depth,
-        draw: () => {
-          const hitRadius = draw3DPokemonOnMap(wp.x, wp.y, wp.depth, w.data.speciesId, w.data.isShiny, w.visualScale, timeSec + i, false);
-          clickableMapTargets.push({ x: wp.x, y: wp.y - hitRadius * 0.4, r: Math.max(36, hitRadius), type: "wild", index: i });
+    // Luz Direcional Sol + Rim Light 3D
+    const lightDir = E.norm3({ x: 0.45, y: 0.82, z: 0.35 });
+
+    for (const cmd of drawCmds) {
+      const mvp = E.mat4Mul(vp, cmd.model);
+      const verts = cmd.mesh.verts;
+      const indices = cmd.mesh.indices;
+
+      for (let t = 0; t < indices.length; t += 3) {
+        const v0 = verts[indices[t]], v1 = verts[indices[t + 1]], v2 = verts[indices[t + 2]];
+        const rawV = [v0, v1, v2];
+        const sx = [0, 0, 0], sy = [0, 0, 0], sz = [0, 0, 0];
+        const wn = [{ x: 0, y: 1, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 1, z: 0 }];
+        let behind = false;
+
+        for (let k = 0; k < 3; ++k) {
+          const p = rawV[k].pos;
+          const clip = E.mat4Vec4(mvp, p.x, p.y, p.z, 1.0);
+          if (clip.w <= 0.15) { behind = true; break; }
+          const invW = 1.0 / clip.w;
+          sx[k] = ((clip.x * invW) * 0.5 + 0.5) * cols;
+          sy[k] = ((clip.y * invW) * 0.5 + 0.5) * rows;
+          sz[k] = clip.z * invW;
+
+          const nm = rawV[k].norm;
+          const nw = E.mat4Vec4(cmd.model, nm.x, nm.y, nm.z, 0.0);
+          wn[k] = E.norm3({ x: nw.x, y: nw.y, z: nw.z });
         }
-      });
+        if (behind) continue;
+
+        const area = (sx[2] - sx[0]) * (sy[1] - sy[0]) - (sy[2] - sy[0]) * (sx[1] - sx[0]);
+        if (Math.abs(area) < 1e-5) continue;
+        const invArea = 1.0 / area;
+
+        const minX = Math.max(0, Math.floor(Math.min(sx[0], sx[1], sx[2])));
+        const maxX = Math.min(cols - 1, Math.ceil(Math.max(sx[0], sx[1], sx[2])));
+        const minY = Math.max(0, Math.floor(Math.min(sy[0], sy[1], sy[2])));
+        const maxY = Math.min(rows - 1, Math.ceil(Math.max(sy[0], sy[1], sy[2])));
+
+        for (let py = minY; py <= maxY; ++py) {
+          for (let px = minX; px <= maxX; ++px) {
+            const pfx = px + 0.5, pfy = py + 0.5;
+            const w0 = ((pfx - sx[1]) * (sy[2] - sy[1]) - (pfy - sy[1]) * (sx[2] - sx[1])) * invArea;
+            const w1 = ((pfx - sx[2]) * (sy[0] - sy[2]) - (pfy - sy[2]) * (sx[0] - sx[2])) * invArea;
+            const w2 = 1.0 - w0 - w1;
+            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+
+            const z = w0 * sz[0] + w1 * sz[1] + w2 * sz[2];
+            const idx = py * cols + px;
+            if (z >= gbZ[idx]) continue;
+
+            gbZ[idx] = z;
+            gbId[idx] = cmd.id;
+
+            const nx = wn[0].x * w0 + wn[1].x * w1 + wn[2].x * w2;
+            const ny = wn[0].y * w0 + wn[1].y * w1 + wn[2].y * w2;
+            const nz = wn[0].z * w0 + wn[1].z * w1 + wn[2].z * w2;
+            gbNx[idx] = nx; gbNy[idx] = ny; gbNz[idx] = nz;
+
+            const ndotl = Math.max(0, nx * lightDir.x + ny * lightDir.y + nz * lightDir.z);
+            const rim = Math.pow(1.0 - Math.min(1, Math.abs(nz)), 2.0) * 0.45;
+            gbLight[idx] = Math.min(1.45, 0.35 + 0.72 * ndotl + rim);
+
+            if (cmd.tintRedLaser) {
+              // Tinta de Energia Vermelha/Laser quando o Pokémon está entrando/saindo da Pokébola
+              gbColR[idx] = 1.0;
+              gbColG[idx] = 0.22;
+              gbColB[idx] = 0.28;
+            } else if (cmd.tintEvolutionMorph) {
+              // Tinta de Silhueta Branca/Ciano Luminosa durante o Morph 3D de Evolução
+              gbColR[idx] = 0.75;
+              gbColG[idx] = 0.98;
+              gbColB[idx] = 1.0;
+              gbLight[idx] = 1.35;
+            } else {
+              gbColR[idx] = v0.col.x * w0 + v1.col.x * w1 + v2.col.x * w2;
+              gbColG[idx] = v0.col.y * w0 + v1.col.y * w1 + v2.col.y * w2;
+              gbColB[idx] = v0.col.z * w0 + v1.col.z * w1 + v2.col.z * w2;
+            }
+          }
+        }
+      }
     }
 
-    // 6d. PokéStops 3D, Ginásios 3D, Raids 3D e Balão Rocket 3D (Ref: 22.18.13 (2).jpeg)
-    for (let i = 0; i < cityState.pois.length; ++i) {
-      const poi = cityState.pois[i];
-      const pp = E.projectPoint3D(vp, poi.x, 0, poi.z, W, H);
-      if (!pp) continue;
-      renderQueue.push({
-        depth: pp.depth,
-        draw: () => {
-          const hitR = draw3DPoiOnMap(pp.x, pp.y, pp.depth, poi, timeSec);
-          clickableMapTargets.push({ x: pp.x, y: pp.y - hitR * 0.5, r: Math.max(38, hitR), type: "poi", index: i });
+    // Sobel 3D sobre Normais e Z-Buffer das Entidades 3D
+    for (let r = 1; r < rows - 1; ++r) {
+      for (let c = 1; c < cols - 1; ++c) {
+        const i = r * cols + c;
+        if (gbId[i] === 0) continue;
+
+        const idDiff = (gbId[i - 1] !== gbId[i]) || (gbId[i + 1] !== gbId[i]) ||
+                       (gbId[i - cols] !== gbId[i]) || (gbId[i + cols] !== gbId[i]);
+        const nxDiff = Math.abs(gbNx[i + 1] - gbNx[i - 1]) + Math.abs(gbNy[i + cols] - gbNy[i - cols]);
+
+        if (idDiff || nxDiff > 0.55) {
+          edgeMag[i] = 1.0;
+          const gx = gbNx[i + 1] - gbNx[i - 1] + (gbId[i + 1] - gbId[i - 1]);
+          const gy = gbNy[i + cols] - gbNy[i - cols] + (gbId[i + cols] - gbId[i - cols]);
+          const deg = ((Math.atan2(gy, gx) * 180 / Math.PI) + 180) % 180;
+          if (deg < 22.5 || deg >= 157.5) edgeDir[i] = 1;
+          else if (deg >= 67.5 && deg < 112.5) edgeDir[i] = 2;
+          else if (deg >= 22.5 && deg < 67.5) edgeDir[i] = 3;
+          else edgeDir[i] = 4;
         }
-      });
+      }
+    }
+  }
+
+  // ============================================================================
+  // ESTÁGIO 3 DO PIPELINE 100% ASCII: RENDERIZAÇÃO DO GRID DE CARACTERES + VFX
+  // ============================================================================
+  function renderAsciiCanvas(timeSec) {
+    ctx.fillStyle = "#081024";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (!fontLoaded) {
+      ctx.font = `bold ${cellH}px 'Cascadia Mono', 'Fira Code', Consolas, monospace`;
+      ctx.textBaseline = "top";
+      fontLoaded = true;
     }
 
-    renderQueue.sort((a, b) => b.depth - a.depth);
-    for (const item of renderQueue) item.draw();
+    const ramp = qualityTier >= 2 ? E.RAMP_HD : E.RAMP_STD;
+    const rampLen = ramp.length;
+    const dirChars = [" ", "|", "-", "/", "\\"];
+
+    let monPattern = "POKEMON*+#@";
+    if (gameScene === "AR_CAPTURE" && wildMon) {
+      monPattern = `${wildMon.name.toUpperCase()}#${wildMon.speciesId}*+@`;
+    } else if (gameScene === "LIVE_BATTLE" && liveBattle.enemyMon) {
+      monPattern = `${liveBattle.enemyMon.name.toUpperCase()}*⚡🔥💧#`;
+    } else if (gameScene === "EVOLUTION_CUTSCENE") {
+      monPattern = `EVOLUCAO*ATGC✦#${evoScene.toName.toUpperCase()}`;
+    }
+    let patternCursor = 0;
+
+    for (let r = 0; r < rows; ++r) {
+      const py = r * cellH;
+      for (let c = 0; c < cols; ++c) {
+        const i = r * cols + c;
+        const px = c * cellW;
+        const id = gbId[i];
+
+        let fgR, fgG, fgB, bgR, bgG, bgB, ch;
+
+        if (id > 0) {
+          // CÉLULA DE ENTIDADE 3D (Pokémon, Avatar, Pokébola, Anel de Raio 3.5m, Ginásio, PokéStop)
+          const lit = gbLight[i];
+          const cr = Math.min(1, gbColR[i] * lit);
+          const cg = Math.min(1, gbColG[i] * lit);
+          const cb = Math.min(1, gbColB[i] * lit);
+
+          const isOuterSilhouette =
+            (c > 0 && gbId[i - 1] === 0) || (c < cols - 1 && gbId[i + 1] === 0) ||
+            (r > 0 && gbId[i - cols] === 0) || (r < rows - 1 && gbId[i + cols] === 0);
+
+          if (id === 7 || id === 2) {
+            // Anel 3D de Raio de Ação / Ancoragem no chão
+            bgR = Math.floor(cr * 110);
+            bgG = Math.floor(cg * 140);
+            bgB = Math.floor(cb * 160);
+            fgR = Math.min(255, Math.floor(cr * 255 + 60));
+            fgG = Math.min(255, Math.floor(cg * 255 + 60));
+            fgB = Math.min(255, Math.floor(cb * 255 + 60));
+            ch = (c + r) % 2 === 0 ? "o" : "·";
+          } else if (isOuterSilhouette) {
+            // Contorno Cel-Shaded em ASCII para leitura cristalina dos Pokémons 3D!
+            bgR = Math.floor(cr * 48);
+            bgG = Math.floor(cg * 48);
+            bgB = Math.floor(cb * 58);
+            fgR = Math.min(255, Math.floor(cr * 255 + 95));
+            fgG = Math.min(255, Math.floor(cg * 255 + 95));
+            fgB = Math.min(255, Math.floor(cb * 255 + 95));
+            ch = edgeDir[i] > 0 ? dirChars[edgeDir[i]] : "@";
+          } else {
+            bgR = Math.floor(cr * 195);
+            bgG = Math.floor(cg * 195);
+            bgB = Math.floor(cb * 195);
+
+            fgR = Math.min(255, Math.floor(cr * 255 + 52));
+            fgG = Math.min(255, Math.floor(cg * 255 + 52));
+            fgB = Math.min(255, Math.floor(cb * 255 + 52));
+
+            if (edgeMag[i] > 0.65 && edgeDir[i] > 0) {
+              ch = dirChars[edgeDir[i]];
+            } else if ((id === 1 || id >= 50) && ((r + c) % 3 === 0)) {
+              ch = monPattern[(patternCursor++) % monPattern.length];
+            } else {
+              const luma = Math.min(1, 0.299 * cr + 0.587 * cg + 0.114 * cb);
+              ch = ramp[Math.min(rampLen - 1, Math.floor(luma * (rampLen - 1)))];
+            }
+          }
+        } else {
+          // CÉLULA DO AMBIENTE 3D EM ASCII (Mapa GPS Pokémon GO, Câmera Ao Vivo, Estádio)
+          const cr = camR[i], cg = camG[i], cb = camB[i], luma = camLuma[i];
+          bgR = Math.floor(cr * 175);
+          bgG = Math.floor(cg * 175);
+          bgB = Math.floor(cb * 185);
+
+          fgR = Math.min(255, Math.floor(cr * 255 + 48));
+          fgG = Math.min(255, Math.floor(cg * 255 + 52));
+          fgB = Math.min(255, Math.floor(cb * 255 + 58));
+
+          if (edgeMag[i] > 0.18 && edgeDir[i] > 0) {
+            ch = dirChars[edgeDir[i]];
+          } else {
+            const idx = Math.min(rampLen - 1, Math.max(1, Math.floor(luma * (rampLen - 1))));
+            ch = ramp[idx];
+          }
+        }
+
+        ctx.fillStyle = `rgb(${bgR},${bgG},${bgB})`;
+        ctx.fillRect(px, py, cellW, cellH);
+
+        ctx.fillStyle = `rgb(${fgR},${fgG},${fgB})`;
+        ctx.fillText(ch, px, py);
+      }
+    }
+
+    // ============================================================================
+    // EFEITOS VISUAIS EM ASCII SOBRE O GRID (FEIXE LASER DA POKÉBOLA, VFX DE BATALHA, DNA DE EVOLUÇÃO)
+    // ============================================================================
+    if (gameScene === "CITY_MAP") {
+      drawCityFloatingLabels();
+    } else if (gameScene === "AR_CAPTURE" && wildMon) {
+      drawCaptureAsciiLaserAndRing(timeSec);
+    } else if (gameScene === "LIVE_BATTLE" && liveBattle.active) {
+      drawLiveBattleAsciiVfxAndHud(timeSec);
+    } else if (gameScene === "EVOLUTION_CUTSCENE" && evoScene.active) {
+      drawEvolutionAsciiHelixAndHud(timeSec);
+    }
   }
 
-  // Desenha o Pokémon 3D com Texto ASCII Contido na Silhueta + Anel Branco no Chão (Ref: 22.18.13 (2).jpeg)
-  function draw3DPokemonOnMap(sx, sy, depth, speciesId, isShiny, scale, timeSec, isBuddy) {
-    const sizePx = Math.max(38, Math.min(135, (380 / Math.max(2.2, depth)) * scale));
-    const bounceY = Math.abs(Math.sin(timeSec * 3.2)) * (sizePx * 0.08);
-
+  // Etiquetas flutuantes clicáveis sobre o Mapa 3D ASCII
+  function drawCityFloatingLabels() {
     ctx.save();
-    // Anel branco no chão sob o Pokémon (igual ao Munna na ref 22.18.13 (2).jpeg!)
-    ctx.strokeStyle = isBuddy ? "rgba(255, 216, 72, 0.85)" : "rgba(255, 255, 255, 0.85)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(sx, sy, sizePx * 0.46, sizePx * 0.26, 0, 0, Math.PI * 2);
-    ctx.stroke();
+    for (const t of projectedClickTargets) {
+      if (t.x < -40 || t.x > canvas.width + 40 || t.y < -40 || t.y > canvas.height + 40) continue;
+      const isWild = t.type === "WILD";
+      const bg = isWild ? "rgba(16, 120, 96, 0.88)" :
+                 (t.type === "GYM" ? "rgba(140, 38, 56, 0.88)" :
+                 (t.type === "VILLAIN" ? "rgba(105, 35, 165, 0.90)" : "rgba(18, 92, 168, 0.88)"));
 
-    // Sombra 3D no chão
-    ctx.fillStyle = "rgba(8, 14, 35, 0.45)";
-    ctx.beginPath();
-    ctx.ellipse(sx, sy, sizePx * 0.34, sizePx * 0.16, 0, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      const text = `${t.label} (${t.sub})`;
+      const w = Math.max(84, ctx.measureText(text).width + 18);
+      const h = 24;
+      const bx = t.x - w / 2;
+      const by = t.y - 34;
 
-    // Escultura 3D ASCII do Pokémon
-    const sculp = E.getPokemonAscii3DSculpture(speciesId, isShiny, false);
-    ctx.drawImage(sculp, sx - sizePx * 0.5, sy - sizePx * 0.88 - bounceY, sizePx, sizePx);
-    ctx.restore();
-    return sizePx * 0.55;
-  }
-
-  // Desenha o Avatar 3D Personalizado do Treinador no Centro do Mapa
-  function draw3DTrainerAvatarOnMap(sx, sy, depth, prof, timeSec) {
-    const h = Math.max(46, Math.min(110, 390 / Math.max(2.5, depth)));
-    const walkBob = cityState.isWalking ? Math.sin(timeSec * 12) * 4 : 0;
-    const legSwing = cityState.isWalking ? Math.sin(timeSec * 12) * 7 : 0;
-
-    ctx.save();
-    // Sombra proyectada no chão
-    ctx.fillStyle = "rgba(8, 15, 38, 0.52)";
-    ctx.beginPath(); ctx.ellipse(sx + 6, sy + 2, h * 0.32, h * 0.14, 0.2, 0, Math.PI * 2); ctx.fill();
-
-    // Pernas e tênis brancos
-    ctx.strokeStyle = "#192848";
-    ctx.lineWidth = h * 0.11;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(sx - h*0.09, sy - h*0.36); ctx.lineTo(sx - h*0.11 + legSwing, sy - 4);
-    ctx.moveTo(sx + h*0.09, sy - h*0.36); ctx.lineTo(sx + h*0.11 - legSwing, sy - 4);
-    ctx.stroke();
-
-    ctx.fillStyle = "#ffffff";
-    ctx.beginPath();
-    ctx.arc(sx - h*0.11 + legSwing, sy - 2, h*0.07, 0, Math.PI*2);
-    ctx.arc(sx + h*0.11 - legSwing, sy - 2, h*0.07, 0, Math.PI*2);
-    ctx.fill();
-
-    // Jaqueta personalizada com textura ASCII interna
-    ctx.fillStyle = (prof.avatar && prof.avatar.outfitColor) ? prof.avatar.outfitColor : "#ff8a8a";
-    ctx.beginPath();
-    ctx.roundRect(sx - h*0.18, sy - h*0.72 - walkBob, h*0.36, h*0.38, 8);
-    ctx.fill();
-
-    // Cabeça + Cabelo + Máscara/Visor estilo ref 22.18.10 (1).jpeg
-    ctx.fillStyle = (prof.avatar && prof.avatar.skinColor) ? prof.avatar.skinColor : "#d99b72";
-    ctx.beginPath(); ctx.arc(sx, sy - h*0.84 - walkBob, h*0.15, 0, Math.PI*2); ctx.fill();
-
-    ctx.fillStyle = "#8a5cf5"; // Cabelo estilizado
-    ctx.beginPath(); ctx.arc(sx, sy - h*0.89 - walkBob, h*0.16, Math.PI, 0); ctx.fill();
-    ctx.restore();
-  }
-
-  // Desenha PokéStop 3D, Ginásio 3D e Balão da Equipe Rocket 3D (Ref: 22.18.13 (2).jpeg)
-  function draw3DPoiOnMap(sx, sy, depth, poi, timeSec) {
-    const scale = Math.max(26, Math.min(95, 340 / Math.max(2.5, depth)));
-    ctx.save();
-
-    if (poi.type === "pokestop") {
-      // Anel branco no chão + Cubo Ciano 3D flutuante idêntico ao topo da ref 22.18.13 (2).jpeg!
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.ellipse(sx, sy, scale * 0.55, scale * 0.28, 0, 0, Math.PI * 2); ctx.stroke();
-
-      ctx.strokeStyle = "#22d3ee";
-      ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx, sy - scale * 0.75); ctx.stroke();
-
-      const cubeY = sy - scale * 0.95 + Math.sin(timeSec * 3) * 3;
-      ctx.fillStyle = "#06b6d4";
+      ctx.fillStyle = bg;
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(sx, cubeY - scale*0.26);
-      ctx.lineTo(sx + scale*0.24, cubeY);
-      ctx.lineTo(sx, cubeY + scale*0.26);
-      ctx.lineTo(sx - scale*0.24, cubeY);
-      ctx.closePath();
+      ctx.roundRect(bx, by, w, h, 12);
       ctx.fill();
-      ctx.strokeStyle = "#cffafe";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    } else if (poi.type === "gym" || poi.type === "raid") {
-      // Estádio 3D Prata/Vermelho/Azul flutuante igual à ref 22.18.13 (2).jpeg!
-      const isRaid = poi.type === "raid";
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.ellipse(sx, sy, scale * 0.7, scale * 0.36, 0, 0, Math.PI * 2); ctx.stroke();
-
-      const topY = sy - scale * 1.15;
-      ctx.fillStyle = "#e2e8f0";
-      ctx.beginPath(); ctx.ellipse(sx, topY, scale * 0.72, scale * 0.38, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = isRaid ? "#ef4444" : "#3b82f6";
-      ctx.lineWidth = 3.5;
       ctx.stroke();
 
-      // Pokémon Guardião ou Raid Boss 3D no topo do Ginásio!
-      const monId = isRaid ? (poi.bossId || 150) : (poi.guardId || 26);
-      const sculp = E.getPokemonAscii3DSculpture(monId, false, false);
-      ctx.drawImage(sculp, sx - scale*0.55, topY - scale*0.95, scale*1.1, scale*1.1);
-    } else if (poi.type === "villain") {
-      // Grande Balão Preto da Equipe Rocket com 'R' Laranja-Vermelho flutuando sobre o mapa (Ref: 22.18.13 (2).jpeg)!
-      const floatY = sy - scale * 1.65 + Math.sin(timeSec * 2.2) * 6;
-      const bRad = scale * 0.85;
-
-      // Sombra no chão
-      ctx.fillStyle = "rgba(8, 12, 28, 0.45)";
-      ctx.beginPath(); ctx.ellipse(sx, sy, bRad * 0.45, bRad * 0.22, 0, 0, Math.PI * 2); ctx.fill();
-
-      // Cesto
-      ctx.fillStyle = "#475569";
-      ctx.fillRect(sx - bRad*0.18, floatY + bRad*0.85, bRad*0.36, bRad*0.24);
-
-      // Balão Esférico 3D Escuro
-      const bGrad = ctx.createRadialGradient(sx - bRad*0.28, floatY - bRad*0.28, bRad*0.1, sx, floatY, bRad);
-      bGrad.addColorStop(0, "#475582");
-      bGrad.addColorStop(0.6, "#1e294b");
-      bGrad.addColorStop(1, "#0f172a");
-      ctx.fillStyle = bGrad;
-      ctx.beginPath(); ctx.arc(sx, floatY, bRad, 0, Math.PI * 2); ctx.fill();
-
-      // Letra 'R' Vermelha no Balão
-      ctx.fillStyle = "#e11d48";
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 1.5;
-      ctx.font = `900 ${Math.round(bRad * 0.82)}px Arial, sans-serif`;
+      ctx.fillStyle = "#ffffff";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("R", sx, floatY + bRad * 0.12);
-      ctx.strokeText("R", sx, floatY + bRad * 0.12);
+      ctx.fillText(text, t.x, by + h / 2);
     }
-
     ctx.restore();
-    return scale;
   }
 
-  // ============================================================================
-  // TELA DE ENCONTRO DE CAPTURA AR 3D:
-  // - Câmera ao Vivo em ASCII HD ou Parque 3D
-  // - Pílula limpa com Nome e CP (Sem escala real!)
-  // - Círculo de Captura GRANDE cobrindo todo o Pokémon!
-  // - Animação 3D ENTRANDO na Pokébola e SAINDO da Pokébola!
-  // ============================================================================
-  function renderPokemonGoArEncounter(W, H, timeSec) {
-    // 1. Fundo: Câmera Ao Vivo em ASCII ou Pradaria AR 3D Limpa
-    if (useRealCamera && video && video.readyState >= 2) {
-      const cw = 130, ch = Math.max(60, Math.round(130 * (H / W)));
-      offCanvas.width = cw; offCanvas.height = ch;
-      offCtx.drawImage(video, 0, 0, cw, ch);
-      const img = offCtx.getImageData(0, 0, cw, ch).data;
-      const cellW = W / cw, cellH = H / ch;
+  // Feixe Laser ASCII da Pokébola (Entrando/Saindo) + Anel Grande de Bônus + Pílula Nome/CP
+  function drawCaptureAsciiLaserAndRing(timeSec) {
+    ctx.save();
+    const cx = lastWildScreenBox.x || (canvas.width * 0.5);
+    const cy = lastWildScreenBox.y || (canvas.height * 0.42);
+    const baseRadius = Math.max(75, lastWildScreenBox.radiusPx || 88);
 
-      ctx.fillStyle = "#09131c";
-      ctx.fillRect(0, 0, W, H);
-      ctx.font = `bold ${Math.ceil(cellH)}px 'Cascadia Mono', Consolas, monospace`;
-      ctx.textBaseline = "top";
+    // 1. FEIXE LASER EM CARACTERES ASCII QUANDO O POKÉMON ENTRA (state=2) OU SAI (state=5) DA POKÉBOLA
+    if (ball.state === 2 || ball.state === 5) {
+      const bx = canvas.width * 0.5 + ball.pos.x * 110;
+      const by = canvas.height * 0.52 - ball.pos.y * 95;
+      const steps = 18;
+      const laserGlyphs = ["*", "+", "@", "#", "✦", "="];
+      ctx.font = `bold ${cellH + 4}px 'Cascadia Mono', Consolas, monospace`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
 
-      const ramp = E.RAMP_INTERNAL;
-      for (let r = 0; r < ch; ++r) {
-        const py = r * cellH;
-        for (let c = 0; c < cw; ++c) {
-          const p = (r * cw + c) * 4;
-          const cr = img[p], cg = img[p+1], cb = img[p+2];
-          const lum = (0.299*cr + 0.587*cg + 0.114*cb) / 255;
-          ctx.fillStyle = `rgb(${Math.round(cr*0.58)},${Math.round(cg*0.58)},${Math.round(cb*0.58)})`;
-          ctx.fillRect(c * cellW, py, cellW + 0.5, cellH + 0.5);
-          const chGlyph = ramp[Math.min(ramp.length - 1, Math.floor(lum * ramp.length))];
-          ctx.fillStyle = `rgb(${Math.min(255,Math.round(cr*1.12))},${Math.min(255,Math.round(cg*1.12))},${Math.min(255,Math.round(cb*1.12))})`;
-          ctx.fillText(chGlyph, c * cellW, py);
-        }
+      for (let s = 0; s <= steps; ++s) {
+        const u = s / steps;
+        const lx = bx * (1 - u) + cx * u + Math.sin(u * 14 + timeSec * 25) * 10;
+        const ly = by * (1 - u) + cy * u + Math.cos(u * 14 - timeSec * 25) * 10;
+        ctx.fillStyle = s % 2 === 0 ? "#ff2a55" : "#ffffff";
+        ctx.fillText(laserGlyphs[(s + Math.floor(timeSec * 30)) % laserGlyphs.length], lx, ly);
       }
-    } else {
-      // Fundo Parque/Pradaria AR do Pokémon GO
-      const sky = ctx.createLinearGradient(0, 0, 0, H * 0.52);
-      sky.addColorStop(0, "#38bdf8");
-      sky.addColorStop(1, "#bae6fd");
-      ctx.fillStyle = sky;
-      ctx.fillRect(0, 0, W, H * 0.52);
 
-      const grass = ctx.createLinearGradient(0, H * 0.48, 0, H);
-      grass.addColorStop(0, "#4ade80");
-      grass.addColorStop(0.4, "#22c55e");
-      grass.addColorStop(1, "#15803d");
-      ctx.fillStyle = grass;
-      ctx.fillRect(0, H * 0.48, W, H * 0.52);
+      // Ondas de choque ASCII ao redor da Pokébola aberta
+      const ringGlyphs = 12;
+      const waveR = 24 + (ball.morphProgress * 55);
+      for (let k = 0; k < ringGlyphs; ++k) {
+        const ang = (k / ringGlyphs) * Math.PI * 2 + timeSec * 6;
+        ctx.fillStyle = "#ff5e7e";
+        ctx.fillText("*", bx + Math.cos(ang) * waveR, by + Math.sin(ang) * waveR);
+      }
     }
 
-    const w = wildSpawns[activeWildIdx] || wildSpawns[0];
-    if (!w) return;
+    // 2. PÍLULA BRANCA COM NOME E CP CONTIDOS DENTRO DELA (Sem escala real!)
+    const pillW = 246, pillH = 44;
+    const pillX = cx - pillW / 2;
+    const pillY = Math.max(58, cy - baseRadius - 58);
 
-    const monCenterX = W * 0.5 - pose.yaw * 220;
-    const monCenterY = H * 0.46 + pose.pitch * 180 - w.jumpOffset * 65;
-    const monSizePx = Math.min(W * 0.62, H * 0.36) * Math.max(0.88, Math.min(1.28, w.visualScale * 0.85));
-
-    // Sombra no chão sob o Pokémon
-    ctx.save();
-    ctx.fillStyle = "rgba(10, 35, 20, 0.35)";
+    ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+    ctx.strokeStyle = "#26ccaa";
+    ctx.lineWidth = 2.5;
     ctx.beginPath();
-    ctx.ellipse(monCenterX, H * 0.58, monSizePx * 0.44, monSizePx * 0.14, 0, 0, Math.PI * 2);
+    ctx.roundRect(pillX, pillY, pillW, pillH, 22);
     ctx.fill();
-    ctx.restore();
+    ctx.stroke();
 
-    // 2. Desenha o Pokémon 3D (com Animação ENTRANDO na Pokébola state=2 ou SAINDO da Pokébola state=5!)
-    if (!w.insideBall || ball.state === 2 || ball.state === 5) {
-      ctx.save();
-      let drawX = monCenterX;
-      let drawY = monCenterY;
-      let drawScale = 1.0;
-      let drawRedBeamTint = false;
+    ctx.fillStyle = "#1c3d44";
+    ctx.font = "800 16px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const shinyPrefix = wildMon.isShiny ? "✨ " : "";
+    ctx.fillText(`${shinyPrefix}${wildMon.name}   CP ${wildMon.cp}`, cx, pillY + 16);
 
-      if (ball.state === 2) {
-        // ANIMAÇÃO ENTRANDO NA POKÉBOLA: O Pokémon vira energia vermelha, encolhe e voa em arco para dentro da Pokébola aberta!
-        const t = Math.min(1.0, ball.timer / 0.68);
-        const ballScreenX = W * 0.5;
-        const ballScreenY = H * 0.34;
-        drawX = monCenterX * (1 - t) + ballScreenX * t;
-        drawY = monCenterY * (1 - t) + ballScreenY * t - Math.sin(t * Math.PI) * 55;
-        drawScale = Math.max(0.06, 1.0 - t * 0.94);
-        drawRedBeamTint = true;
+    const sp = window.PokeData.getSpecies(wildMon.speciesId);
+    const berryTxt = activeBerry ? ` • 🍓 ${activeBerry.replace("_", " ").toUpperCase()}` : "";
+    ctx.fillStyle = "#158078";
+    ctx.font = "700 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.fillText(`Tipo: ${sp.types.join("/")}${berryTxt}`, cx, pillY + 33);
 
-        // Feixe laser vermelho conectando a Pokébola aberta ao Pokémon!
-        ctx.strokeStyle = "rgba(255, 50, 90, 0.88)";
-        ctx.lineWidth = 10 * (1 - t * 0.5);
-        ctx.beginPath();
-        ctx.moveTo(ballScreenX, ballScreenY);
-        ctx.lineTo(drawX, drawY);
-        ctx.stroke();
-      } else if (ball.state === 5) {
-        // ANIMAÇÃO SAINDO DA POKÉBOLA: A Pokébola explode em luz no chão e o Pokémon emerge crescendo de dentro dela!
-        const t = Math.min(1.0, ball.timer / 0.65);
-        const ballGroundX = W * 0.5;
-        const ballGroundY = H * 0.60;
-        drawX = ballGroundX * (1 - t) + monCenterX * t;
-        drawY = ballGroundY * (1 - t) + monCenterY * t - Math.sin(t * Math.PI) * 70;
-        drawScale = 0.08 + 0.92 * t;
-        drawRedBeamTint = (t < 0.55);
+    // 3. ANEL DE MIRA E BÔNUS DE CAPTURA GRANDE (Cobre todo o diâmetro do Pokémon 3D!)
+    if (ball.state === 0) {
+      targetRingPhase -= 0.011;
+      if (targetRingPhase < 0.18) targetRingPhase = 1.0;
 
-        // Anel de choque luminoso da Pokébola abrindo!
-        ctx.strokeStyle = `rgba(255, 255, 255, ${1 - t})`;
-        ctx.lineWidth = 8 * (1 - t);
-        ctx.beginPath();
-        ctx.arc(ballGroundX, ballGroundY, t * 140, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      const sPx = monSizePx * drawScale;
-      const sculp = E.getPokemonAscii3DSculpture(w.data.speciesId, w.data.isShiny, false);
-      ctx.translate(drawX, drawY);
-      if (ball.state === 2) ctx.rotate(ball.timer * 12);
-      ctx.drawImage(sculp, -sPx * 0.5, -sPx * 0.5, sPx, sPx);
-
-      if (drawRedBeamTint) {
-        ctx.globalCompositeOperation = "source-atop";
-        ctx.fillStyle = "rgba(255, 45, 95, 0.65)";
-        ctx.fillRect(-sPx * 0.5, -sPx * 0.5, sPx, sPx);
-      }
-      ctx.restore();
-    }
-
-    // 3. PÍLULA LIMPA DE NOME E CP + ANEL DE CAPTURA GRANDE (Quando o Pokémon está livre mirando!)
-    if (ball.state === 0 || ball.state === 1) {
-      ctx.save();
-      // Pílula de Nome + CP estilo Pokémon GO (Sem texto de escala real!)
-      const pillW = 210, pillH = 44;
-      const pillX = monCenterX - pillW * 0.5;
-      const pillY = monCenterY - monSizePx * 0.58 - 54;
-
-      ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
-      ctx.beginPath(); ctx.roundRect(pillX, pillY, pillW, pillH, 22); ctx.fill();
-      ctx.strokeStyle = "rgba(38, 204, 170, 0.7)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      ctx.textAlign = "center";
-      ctx.fillStyle = "#254a52";
-      ctx.font = "800 15px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      const berryIcon = w.berryApplied ? ` ${D.ITEMS_CATALOG[w.berryApplied].icon}` : "";
-      const shinyIcon = w.data.isShiny ? "✨ " : "";
-      ctx.fillText(`${shinyIcon}${w.species.name}${berryIcon}`, monCenterX, pillY + 18);
-
-      ctx.fillStyle = "#1c8c82";
-      ctx.font = "800 13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      ctx.fillText(`CP ${w.data.cp}`, monCenterX, pillY + 36);
-
-      // CÍRCULO DE CAPTURA GRANDE (cobre todo o diâmetro do Pokémon!)
-      const outerRadius = monSizePx * 0.54;
+      // Anel Branco Fixo Externo
       ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
-      ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(monCenterX, monCenterY, outerRadius, 0, Math.PI * 2); ctx.stroke();
-
-      const innerRadius = outerRadius * ball.ringRadius;
-      const ringCol = ball.ringRadius <= 0.34 ? "#22c55e" : (ball.ringRadius <= 0.66 ? "#eab308" : "#f97316");
-      ctx.strokeStyle = ringCol;
-      ctx.lineWidth = 4.5;
-      ctx.beginPath(); ctx.arc(monCenterX, monCenterY, innerRadius, 0, Math.PI * 2); ctx.stroke();
-      ctx.restore();
-    }
-
-    // 4. Desenha a Pokébola 3D (No Dock, Voando, Abrindo para Sugar, Balançando no Chão ou Abrindo ao Escapar!)
-    renderPokeball3DInEncounter(W, H, monCenterX, monCenterY, timeSec);
-  }
-
-  function renderPokeball3DInEncounter(W, H, monX, monY, timeSec) {
-    ctx.save();
-    let bx = W * 0.5, by = H - 88, bRad = 34, rot = 0, lidOpen = 0;
-
-    if (ball.state === 0) {
-      rot = ball.spinAngle * ball.curveDir;
-    } else if (ball.state === 1) {
-      // Projeta posição 3D de voo da Pokébola
-      const tFlight = Math.min(1.0, ball.timer / 0.55);
-      const curveOffsetX = ball.isCurveball ? Math.sin(tFlight * Math.PI) * 110 * ball.curveDir * ball.curveRpm : 0;
-      bx = (W * 0.5) * (1 - tFlight) + (monX + ball.vel.x * 35) * tFlight + curveOffsetX;
-      by = (H - 88) * (1 - tFlight) + monY * tFlight - Math.sin(tFlight * Math.PI) * 145;
-      bRad = 34 * (1 - tFlight * 0.32);
-      rot = timeSec * 16 * ball.curveDir;
-    } else if (ball.state === 2) {
-      // Pokébola ABERTA no ar sugando o Pokémon!
-      bx = W * 0.5;
-      by = H * 0.34;
-      bRad = 28;
-      lidOpen = Math.sin(Math.min(1, ball.timer / 0.68) * Math.PI);
-    } else if (ball.state === 3 || ball.state === 4) {
-      // Pokébola no chão balançando (1, 2, 3) ou capturada!
-      bx = W * 0.5;
-      by = H * 0.62;
-      bRad = 28;
-      if (ball.state === 3) {
-        rot = 0.45 * Math.sin(ball.timer * 15) * Math.exp(-(ball.timer % 0.68) * 2.2);
-      }
-    } else if (ball.state === 5) {
-      // Pokébola ABERTA no chão com o Pokémon saindo dela!
-      bx = W * 0.5;
-      by = H * 0.62;
-      bRad = 28;
-      lidOpen = 1.0 - Math.min(1, ball.timer / 0.65);
-    }
-
-    const ballColors = {
-      poke_ball: "#ef4444", great_ball: "#3b82f6", ultra_ball: "#eab308", master_ball: "#a855f7"
-    };
-    const topColor = ballColors[activeBallType] || "#ef4444";
-
-    ctx.translate(bx, by);
-    ctx.rotate(rot);
-
-    // Hemisfério inferior branco
-    ctx.fillStyle = "#f8fafc";
-    ctx.beginPath(); ctx.arc(0, 0, bRad, 0, Math.PI); ctx.fill();
-    ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 2.5; ctx.stroke();
-
-    // Se a Pokébola estiver ABERTA (entrando ou saindo), desenha o núcleo energético brilhante e a tampa articulada levantada!
-    if (lidOpen > 0.05) {
-      ctx.fillStyle = "#ffe4e6";
-      ctx.beginPath(); ctx.ellipse(0, 0, bRad * 0.9, bRad * 0.35, 0, 0, Math.PI * 2); ctx.fill();
-
-      ctx.save();
-      ctx.translate(-bRad * 0.75, -bRad * 0.15);
-      ctx.rotate(-lidOpen * 1.15);
-      ctx.translate(bRad * 0.75, 0);
-      ctx.fillStyle = topColor;
-      ctx.beginPath(); ctx.arc(0, 0, bRad, Math.PI, 0); ctx.fill();
-      ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 2.5; ctx.stroke();
-      ctx.restore();
-    } else {
-      // Tampa superior fechada
-      ctx.fillStyle = topColor;
-      ctx.beginPath(); ctx.arc(0, 0, bRad, Math.PI, 0); ctx.fill();
-      ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 2.5; ctx.stroke();
-
-      // Faixa central preta e botão
-      ctx.fillStyle = "#1e293b";
-      ctx.fillRect(-bRad, -bRad * 0.14, bRad * 2, bRad * 0.28);
-      ctx.fillStyle = ball.state === 4 ? "#22c55e" : "#ffffff";
-      ctx.beginPath(); ctx.arc(0, 0, bRad * 0.30, 0, Math.PI * 2); ctx.fill();
+      ctx.lineWidth = 3.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, baseRadius, 0, Math.PI * 2);
       ctx.stroke();
-    }
-    ctx.restore();
 
-    // Faíscas de Curveball ou Estrelas de Captura Concluída!
-    if (ball.state === 0 && ball.curveRpm > 0.18) {
-      ctx.save();
-      ctx.fillStyle = "#fde047";
-      ctx.font = "bold 18px sans-serif";
-      for (let k = 0; k < 6; ++k) {
-        const a = timeSec * 9 * ball.curveDir + k * (Math.PI / 3);
-        ctx.fillText("✦", bx + Math.cos(a) * 48, by + Math.sin(a) * 48);
+      // Anel Interno Colorido que Encolhe (Verde -> Amarelo -> Laranja -> Vermelho)
+      const innerR = baseRadius * targetRingPhase;
+      const cfg = window.PokeBalance.get();
+      const catchDiff = Math.min(1, wildMon.cp / Math.max(250, 950 * cfg.catchRateMultiplier));
+      const ringColor = catchDiff < 0.35 ? "#22c55e" : (catchDiff < 0.68 ? "#f59e0b" : "#ef4444");
+
+      ctx.strokeStyle = ringColor;
+      ctx.lineWidth = 5.0;
+      ctx.beginPath();
+      ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Indicador de Curveball se estiver girando a Pokébola
+      if (ball.spinRpm > 0.3) {
+        ctx.fillStyle = "#fde047";
+        ctx.font = "800 13px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText("🌀 CURVEBALL ATIVA (+70% BÔNUS!)", cx, canvas.height - 135);
       }
-      ctx.restore();
-    } else if (ball.state === 4) {
-      ctx.save();
+    }
+
+    // Texto de Bônus de Arremesso (NICE! / GREAT! / EXCELLENT!)
+    if (ball.throwBonusLabel && (ball.state === 2 || ball.state === 3)) {
       ctx.fillStyle = "#fde047";
-      ctx.font = "bold 22px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("✨ ★ ✨", bx, by - 45 - ball.timer * 20);
-      ctx.restore();
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 4;
+      ctx.font = "900 26px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.strokeText(ball.throwBonusLabel, cx, cy - 30);
+      ctx.fillText(ball.throwBonusLabel, cx, cy - 30);
     }
+
+    ctx.restore();
   }
 
   // ============================================================================
-  // FÍSICA DE CAPTURA COM ANIMAÇÃO ENTRANDO E SAINDO DA POKÉBOLA
+  // FÍSICA 3D DA POKÉBOLA + TRANSIÇÕES ENTRANDO (state=2) E SAINDO (state=5)
   // ============================================================================
-  function enterArEncounterWithWild(wildIdx) {
-    if (wildIdx < 0 || wildIdx >= wildSpawns.length) return;
-    activeWildIdx = wildIdx;
-    const w = wildSpawns[wildIdx];
-    w.insideBall = false;
-    pose.yaw = 0;
-    pose.pitch = 0;
-    ball.state = 0;
-    ball.curveRpm = 0;
-
-    gameScene = "AR_CAPTURE";
-    document.getElementById("map-overworld-hud").style.display = "none";
-    document.getElementById("ar-encounter-hud").style.display = "block";
-    A.playPokemonCry(w.data.speciesId);
-  }
-
-  function throwPokeball(speed = 7.4, yawOffset = 0.0) {
-    if (ball.state !== 0) return;
-    const prof = S.getProfile();
-    if ((prof.bag[activeBallType] || 0) <= 0) {
-      S.showToast(`⚠️ Você está sem ${D.ITEMS_CATALOG[activeBallType].name}! Gire um PokéStop no Mapa.`, "warn");
-      return;
-    }
-    prof.bag[activeBallType]--;
-    S.save();
-
-    ball.isCurveball = ball.curveRpm > 0.35;
-    ball.vel = E.vec3(yawOffset, speed, 0);
-    ball.state = 1;
-    ball.timer = 0;
-    ball.shakes = 0;
-    A.playThrow();
-  }
-
-  function updateCaptureAndWildPhysics(dt, timeSec) {
-    // Anel grande encolhe continuamente de 1.0 até 0.16
-    ball.ringRadius = 1.0 - ((timeSec * 0.58) % 0.84);
-
-    for (let i = 0; i < wildSpawns.length; ++i) {
-      const w = wildSpawns[i];
-      if (w.calmedByNanab || w.insideBall) { w.jumpOffset = 0; continue; }
-      w.actionTimer += dt;
-      const cycle = w.actionTimer % 6.5;
-      w.jumpOffset = (cycle > 5.2 && cycle < 5.9) ? Math.sin(((cycle - 5.2) / 0.7) * Math.PI) : 0;
-    }
+  function updatePokeballPhysics(dt) {
+    if (gameScene !== "AR_CAPTURE" || !wildMon) return;
 
     if (ball.state === 0) {
-      ball.curveRpm = Math.max(0, ball.curveRpm - dt * 0.25);
-      ball.spinAngle += (2.0 + ball.curveRpm * 24.0) * dt;
-      return;
-    }
+      ball.spinRpm = Math.max(0, ball.spinRpm - dt * 1.4);
+      ball.rotAngle += (1.2 + ball.spinRpm * 14.0) * dt;
+      ball.lidOpenAngle = 0;
+    } else if (ball.state === 1) {
+      // Voo parabólico 3D com força Magnus (Curveball)
+      ball.pos.x += ball.vel.x * dt;
+      ball.pos.y += ball.vel.y * dt;
+      ball.pos.z += ball.vel.z * dt;
+      ball.vel.y -= 9.2 * dt;
+      ball.vel.x += ball.curveDir * ball.spinRpm * 3.0 * dt;
+      ball.rotAngle += (6.0 + ball.spinRpm * 18.0) * dt;
 
-    if (ball.state === 1) {
-      ball.timer += dt;
-      if (ball.timer >= 0.55) {
-        // Verifica acerto no Pokémon alvo
-        const w = wildSpawns[activeWildIdx] || wildSpawns[0];
-        if (Math.abs(ball.vel.x) < 0.85) {
-          const cfg = B.get();
-          const prof = S.getProfile();
-          let throwMult = 1.0, throwLabel = "Nice!";
-          if (ball.ringRadius <= 0.34) {
-            throwMult = cfg.excellentThrowMult || 1.85;
-            throwLabel = "Excellent!";
-            prof.stats.excellentThrows++;
-          } else if (ball.ringRadius <= 0.66) {
-            throwMult = cfg.greatThrowMult || 1.50;
-            throwLabel = "Great!";
-          } else {
-            throwMult = cfg.niceThrowMult || 1.15;
-          }
-          if (ball.isCurveball) {
-            throwMult *= (cfg.curveballBonusMult || 1.70);
-            throwLabel += " + Curveball!";
-            prof.stats.curveballsLanded++;
-          }
+      const dx = ball.pos.x - wildAnchor.x;
+      const dy = ball.pos.y - (wildAnchor.y + 0.55);
+      const dz = ball.pos.z - wildAnchor.z;
+      const dist = Math.hypot(dx, dy, dz);
 
-          const medal = D.getTypeMedalInfo(prof, w.species.types[0]);
-          const ballItem = D.ITEMS_CATALOG[activeBallType] || D.ITEMS_CATALOG.poke_ball;
-          const berryItem = w.berryApplied ? D.ITEMS_CATALOG[w.berryApplied] : null;
-          const berryMult = berryItem ? (berryItem.catchMult || 1.0) : 1.0;
-          const globalMult = cfg.catchRateMultiplier || 1.15;
+      if (dist < 1.25 && ball.pos.z <= wildAnchor.z + 0.9) {
+        // ACERTOU O POKÉMON 3D! Inicia o Estágio 2: Tampa 3D da Pokébola abre + Feixe Laser ASCII!
+        window.PokeAudio.playBallHit();
+        ball.state = 2;
+        ball.morphProgress = 0.0;
+        ball.pos = { x: wildAnchor.x * 0.4, y: 0.25, z: wildAnchor.z + 0.85 };
 
-          const catchProb = Math.min(1.0,
-            1.0 - Math.pow(1.0 - Math.min(0.95, w.species.baseCatchRate * globalMult),
-                           ballItem.catchMult * berryMult * throwMult * medal.catchBonus)
-          );
-
-          ball.willCatch = (activeBallType === "master_ball") || (Math.random() <= catchProb);
-          ball.shakesRequired = ball.willCatch ? 3 : (1 + Math.floor(Math.random() * 2));
-          ball.throwBonusLabel = throwLabel;
-          ball.throwBonusMult = throwMult;
-          ball.state = 2; // Inicia Animação ENTRANDO NA POKÉBOLA!
-          ball.timer = 0;
-          A.playBallHit();
-          S.showToast(`🎯 ${throwLabel}`, "info");
+        const cfg = window.PokeBalance.get();
+        if (targetRingPhase < 0.34) {
+          ball.throwBonusLabel = "EXCELLENT! ✨";
+          ball.throwBonusMult = cfg.excellentThrowMult;
+          window.PokeStorage.getProfile().stats.excellentThrows++;
+        } else if (targetRingPhase < 0.65) {
+          ball.throwBonusLabel = "GREAT! 🔥";
+          ball.throwBonusMult = cfg.greatThrowMult;
+        } else if (targetRingPhase < 0.88) {
+          ball.throwBonusLabel = "NICE! 👍";
+          ball.throwBonusMult = cfg.niceThrowMult;
         } else {
-          ball.state = 0;
-          ball.curveRpm = 0;
+          ball.throwBonusLabel = "";
+          ball.throwBonusMult = 1.0;
         }
+        if (ball.spinRpm > 0.35) {
+          ball.throwBonusLabel = "🌀 CURVEBALL " + ball.throwBonusLabel;
+        }
+      } else if (ball.pos.y < -2.3 || ball.pos.z < -12.0) {
+        window.PokeStorage.showToast("💨 A Pokébola errou o alvo! Tente novamente.", "warn");
+        resetBall();
       }
     } else if (ball.state === 2) {
-      // Estado 2: Pokémon ENTRANDO na Pokébola aberta
-      ball.timer += dt;
-      if (ball.timer >= 0.68) {
-        const w = wildSpawns[activeWildIdx] || wildSpawns[0];
-        w.insideBall = true;
+      // ANIMAÇÃO 3D ENTRANDO NA POKÉBOLA: Tampa superior abre (1.18 rad) e suga o Pokémon em ASCII!
+      ball.morphProgress += dt * 1.45;
+      if (ball.morphProgress < 0.78) {
+        ball.lidOpenAngle = Math.min(1.18, ball.morphProgress * 2.8);
+      } else {
+        // Tampa fecha de volta antes de cair no chão
+        ball.lidOpenAngle = Math.max(0, 1.18 * (1.0 - (ball.morphProgress - 0.78) / 0.22));
+      }
+
+      if (ball.morphProgress >= 1.0) {
+        ball.lidOpenAngle = 0;
         ball.state = 3;
-        ball.timer = 0;
-        ball.shakes = 0;
+        ball.pos = { x: wildAnchor.x, y: -1.08, z: wildAnchor.z + 0.4 };
+        ball.shakeCount = 0;
+        ball.shakeTimer = 0;
+        evaluateCaptureProbability();
       }
     } else if (ball.state === 3) {
-      // Estado 3: Balançando no chão
-      ball.timer += dt;
-      const sh = Math.floor(ball.timer / 0.68);
-      if (sh > ball.shakes && sh <= ball.shakesRequired) {
-        ball.shakes = sh;
-        A.playBallShake(sh);
-      }
-      if (ball.timer >= (ball.shakesRequired * 0.68 + 0.35)) {
-        const w = wildSpawns[activeWildIdx] || wildSpawns[0];
-        if (ball.willCatch) {
-          ball.state = 4;
-          ball.timer = 0;
-          completePokemonCapture(w);
-        } else {
-          // Pokémon ESCAPOU: Inicia Estado 5 (Animação SAINDO DA POKÉBOLA aberta!)
-          ball.state = 5;
-          ball.timer = 0;
-          A.playBreakout();
-          A.playPokemonCry(w.data.speciesId);
-          S.showToast(`💢 ${w.species.name} saiu da Pokébola!`, "warn");
+      // 3 Balançadas no chão
+      ball.shakeTimer += dt;
+      if (ball.shakeTimer >= 0.92) {
+        ball.shakeTimer = 0;
+        ball.shakeCount++;
+        window.PokeAudio.playBallShake(ball.shakeCount);
+
+        if (ball.shakeCount >= ball.shakeTarget) {
+          if (ball.shakeTarget === 4) {
+            completePokemonCapture();
+          } else {
+            // ESCAPOU! Inicia o Estágio 5: Tampa 3D abre no chão e o Pokémon emerge de dentro!
+            window.PokeAudio.playBreakout();
+            ball.state = 5;
+            ball.morphProgress = 0.0;
+          }
         }
-      }
-    } else if (ball.state === 4) {
-      ball.timer += dt;
-      if (ball.timer >= 1.15) {
-        ball.state = 0;
-        ball.curveRpm = 0;
-        const prof = S.getProfile();
-        const rolled = D.rollWeightedSpawn(B.get(), prof.level);
-        const sp = D.getSpecies(rolled.speciesId);
-        const ang = Math.random() * Math.PI * 2;
-        const dist = 2.4 + Math.random() * 2.2;
-        wildSpawns[activeWildIdx] = {
-          data: rolled, species: sp,
-          mapX: cityState.playerX + Math.sin(ang) * dist,
-          mapZ: cityState.playerZ - Math.cos(ang) * dist,
-          pos: E.vec3(0, -1.0, -3.4),
-          visualScale: E.computeVisualScale(sp.height_m),
-          jumpOffset: 0, actionTimer: 0,
-          calmedByNanab: false, berryApplied: null, insideBall: false
-        };
-        toggleSceneMode("CITY_MAP");
-        showPokemonDetailCardModal(prof.pokemonBox[0].uid);
       }
     } else if (ball.state === 5) {
-      // Estado 5: Animação do Pokémon SAINDO da Pokébola aberta!
-      ball.timer += dt;
-      if (ball.timer >= 0.65) {
-        const w = wildSpawns[activeWildIdx] || wildSpawns[0];
-        w.insideBall = false;
-        ball.state = 0;
-        ball.curveRpm = 0;
+      // ANIMAÇÃO 3D SAINDO DA POKÉBOLA (BREAKOUT): Tampa abre e o Pokémon cresce de volta!
+      ball.morphProgress += dt * 1.65;
+      ball.lidOpenAngle = Math.min(1.22, Math.sin(Math.min(1, ball.morphProgress) * Math.PI) * 1.25);
+      if (ball.morphProgress >= 1.0) {
+        window.PokeStorage.showToast(`💢 ${wildMon.name} abriu a Pokébola e escapou!`, "warn");
+        activeBerry = null;
+        resetBall();
       }
     }
   }
 
-  function completePokemonCapture(w) {
-    A.playGotchaFanfare();
-    const prof = S.getProfile();
-    const cfg = B.get();
+  function evaluateCaptureProbability() {
+    const cfg = window.PokeBalance.get();
+    const sp = window.PokeData.getSpecies(wildMon.speciesId);
+    const ballItem = window.PokeData.ITEMS[activeBallType] || window.PokeData.ITEMS.poke_ball;
+    const berryMult = activeBerry && window.PokeData.ITEMS[activeBerry] ? (window.PokeData.ITEMS[activeBerry].catchMult || 1.0) : 1.0;
+    const curveMult = ball.spinRpm > 0.35 ? cfg.curveballBonusMult : 1.0;
 
-    const berryItem = w.berryApplied ? D.ITEMS_CATALOG[w.berryApplied] : null;
-    const candyMult = (berryItem ? (berryItem.candyMult || 1) : 1) * (cfg.candyMultiplier || 1);
-    const candiesEarned = Math.round(3 * candyMult);
-    const dustEarned = Math.round(100 * (cfg.stardustMultiplier || 1));
-    const xpEarned = Math.round((100 + (ball.isCurveball ? 50 : 0)) * ball.throwBonusMult);
+    const totalChance = Math.min(
+      0.99,
+      sp.baseCatchRate * cfg.catchRateMultiplier * ballItem.catchMult * berryMult * curveMult * ball.throwBonusMult
+    );
 
-    prof.pokemonBox.unshift(w.data);
-    prof.pokedexCaught[w.data.speciesId] = (prof.pokedexCaught[w.data.speciesId] || 0) + 1;
-    prof.candies[w.data.speciesId] = (prof.candies[w.data.speciesId] || 0) + candiesEarned;
-
-    if (!prof.typeCounts) prof.typeCounts = {};
-    for (const t of w.species.types) {
-      prof.typeCounts[t] = (prof.typeCounts[t] || 0) + 1;
-    }
-
-    prof.anomalyCharge = Math.min(100, (prof.anomalyCharge || 0) + 20);
-    prof.stardust += dustEarned;
-    prof.stats.totalCaught++;
-    S.addXp(xpEarned);
-    S.save();
-
-    S.showToast(`✨ GOTCHA! ${w.species.name} foi capturado! (+${xpEarned} XP, +${candiesEarned} Candies)`, "info");
-    updateHudCounters();
-  }
-
-  function updateCityMovement(dt) {
-    const moving = cityState.joyActive && (Math.abs(cityState.joyDx) > 0.02 || Math.abs(cityState.joyDy) > 0.02);
-    cityState.isWalking = moving;
-    if (!moving) return;
-
-    const speedMps = 4.0;
-    const camYaw = cityState.camOrbitYaw;
-    const fwdX = Math.sin(camYaw), fwdZ = -Math.cos(camYaw);
-    const rightX = Math.cos(camYaw), rightZ = Math.sin(camYaw);
-
-    const worldDx = (rightX * cityState.joyDx - fwdX * cityState.joyDy) * speedMps * dt;
-    const worldDz = (rightZ * cityState.joyDx - fwdZ * cityState.joyDy) * speedMps * dt;
-
-    cityState.playerX += worldDx;
-    cityState.playerZ += worldDz;
-    cityState.facingYaw = Math.atan2(worldDx, worldDz);
-
-    const distMetersReal = Math.hypot(worldDx, worldDz) * 4.0;
-    if (distMetersReal > 0.01) {
-      const prof = S.getProfile();
-      prof.distanceWalkedM = Number((prof.distanceWalkedM + distMetersReal).toFixed(1));
-      prof.buddyWalkProgressM += distMetersReal;
-
-      const buddyThreshold = B.get().buddyDistancePerCandyM || 250;
-      if (prof.buddyWalkProgressM >= buddyThreshold) {
-        prof.buddyWalkProgressM -= buddyThreshold;
-        prof.anomalyCharge = Math.min(100, (prof.anomalyCharge || 0) + 15);
-        const buddy = prof.pokemonBox.find(p => p.uid === prof.buddyUid) || prof.pokemonBox[0];
-        if (buddy) {
-          prof.candies[buddy.speciesId] = (prof.candies[buddy.speciesId] || 0) + 1;
-          prof.stardust += 250;
-          S.addXp(150);
-          S.showToast(`💛 ${buddy.name} encontrou +1 Candy caminhando com você!`, "info");
-        }
-        spawnWildWave(false);
-        updateHudCounters();
-      }
-    }
-  }
-
-  // ============================================================================
-  // MENU RADIAL E MODAIS REDESENHADOS NO LAYOUT CLARO DO POKÉMON GO (REFS)
-  // ============================================================================
-  function openRadialMenu() {
-    A.playUiClick();
-    const prof = S.getProfile();
-    const lbl = document.getElementById("radial-anomaly-lbl");
-    if (lbl) lbl.textContent = `ANOMALY (${prof.anomalyCharge || 0}%)`;
-    document.getElementById("pogo-radial-menu").style.display = "flex";
-  }
-
-  function closeRadialMenu() {
-    A.playUiClick();
-    document.getElementById("pogo-radial-menu").style.display = "none";
-  }
-
-  function openModal(title, htmlContent) {
-    closeRadialMenu();
-    A.playUiClick();
-    const modal = document.getElementById("game-modal");
-    document.getElementById("modal-title").textContent = title;
-    document.getElementById("modal-body").innerHTML = htmlContent;
-    modal.classList.add("open");
-  }
-
-  function closeModal() {
-    A.playUiClick();
-    document.getElementById("game-modal").classList.remove("open");
-  }
-
-  // 1. Modal POKÉMON BOX (Grade de 3 Colunas idêntica à Ref 22.18.11 (1).jpeg)
-  function showPokemonBoxModal(searchQuery = "") {
-    const prof = S.getProfile();
-    const q = (searchQuery || "").toLowerCase();
-    const list = prof.pokemonBox.filter(p => !q || p.name.toLowerCase().includes(q) || String(p.speciesId) === q);
-
-    let html = `
-      <div style="display:flex;justify-content:space-around;font-size:12px;font-weight:800;color:#7a9a9e;margin-bottom:10px;">
-        <span>TAGS</span>
-        <span style="color:#254a52;border-bottom:3px solid #254a52;padding-bottom:4px;">POKÉMON (${prof.pokemonBox.length}/500)</span>
-        <span onclick="window.PokeGameUI.showRareProgressAndMedalsModal()" style="cursor:pointer;">MEDALS</span>
-      </div>
-      <input class="pogo-search-bar" placeholder="🔍 Search Pokémon or #ID..." value="${searchQuery}"
-        oninput="window.PokeGameUI.showPokemonBoxModal(this.value)"/>
-      <div class="pogo-3col-grid">`;
-
-    for (const pk of list) {
-      const imgSrc = E.getPokemonCardImageSrc(pk.speciesId, pk.isShiny, false);
-      html += `<div class="pogo-mon-cell ${pk.isShiny ? "shiny" : ""}" onclick="window.PokeGameUI.showPokemonDetailCardModal('${pk.uid}')">
-        <div class="pogo-cp-top">CP <b>${pk.cp}</b></div>
-        <img class="pogo-mon-img" src="${imgSrc}" alt="${pk.name}"/>
-        <div class="pogo-mon-name">${pk.isShiny ? "✨" : ""}${pk.name}</div>
-        <div class="pogo-hp-line"></div>
-      </div>`;
-    }
-    html += `</div>`;
-    openModal("POKÉMON", html);
-  }
-
-  // Ficha Completa do Pokémon (Com Peso, Altura, Tipo, CP, HP, IVs, Power Up e Evolução dentro do Card!)
-  function showPokemonDetailCardModal(uid) {
-    const prof = S.getProfile();
-    const pk = prof.pokemonBox.find(p => p.uid === uid);
-    if (!pk) return;
-    const sp = D.getSpecies(pk.speciesId);
-    const iv = D.evaluateIvStars(pk.ivAtk, pk.ivDef, pk.ivSta);
-    const candies = prof.candies[pk.speciesId] || 0;
-    const isBuddy = prof.buddyUid === pk.uid;
-    const nextSp = sp.evolvesTo > 0 ? D.getSpecies(sp.evolvesTo) : null;
-    const imgSrc = E.getPokemonCardImageSrc(pk.speciesId, pk.isShiny, false);
-
-    const html = `
-      <div style="text-align:center;margin-bottom:8px;">
-        <div style="font-size:13px;color:#5a8288;font-weight:800;">CP <span style="font-size:28px;color:#254a52;">${pk.cp}</span></div>
-        <img src="${imgSrc}" style="width:136px;height:136px;object-fit:contain;margin:4px auto;display:block;" onclick="window.PokeAudio.playPokemonCry(${sp.id})"/>
-      </div>
-      <div class="pogo-white-card" style="text-align:center;">
-        <h2 style="font-size:22px;color:#254a52;">${pk.isShiny ? "✨ " : ""}${pk.name}</h2>
-        <div style="width:55%;height:6px;background:#26ccaa;border-radius:3px;margin:8px auto 4px;"></div>
-        <div style="font-size:12px;font-weight:800;color:#5a8288;">${pk.hp} / ${pk.maxHp} HP</div>
-
-        <div class="stat-capsules-row">
-          <div>
-            <div class="stat-cap-val">${sp.weight_kg} kg</div>
-            <div class="stat-cap-lbl">WEIGHT</div>
-          </div>
-          <div style="border-left:1px solid #e5f0ec;border-right:1px solid #e5f0ec;">
-            <div class="stat-cap-val">${sp.types.join(" / ")}</div>
-            <div class="stat-cap-lbl">TYPE</div>
-          </div>
-          <div>
-            <div class="stat-cap-val">${sp.height_m} m</div>
-            <div class="stat-cap-lbl">HEIGHT</div>
-          </div>
-        </div>
-
-        <div style="display:flex;justify-content:space-around;font-size:13px;font-weight:800;margin-bottom:14px;">
-          <span>✨ ${prof.stardust} STARDUST</span>
-          <span>🍬 ${candies} ${sp.name.toUpperCase()} CANDY</span>
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:8px;">
-          <button class="pogo-pill-btn" onclick="window.PokeGameUI.powerUpPokemon('${pk.uid}')">
-            POWER UP (250 ✨ + 1 🍬)
-          </button>
-          ${nextSp ? `<button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.evolvePokemon('${pk.uid}')">
-            EVOLVE → ${nextSp.name.toUpperCase()} (${sp.candyCost} 🍬)
-          </button>` : ""}
-          <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.setBuddyPokemon('${pk.uid}')">
-            ${isBuddy ? "💛 CURRENT BUDDY POKÉMON" : "🐾 SET AS BUDDY POKÉMON"}
-          </button>
-        </div>
-
-        <div style="margin-top:14px;padding-top:12px;border-top:1px solid #e5f0ec;text-align:left;font-size:13px;">
-          <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
-            <b>⚡ Fast Move: ${pk.fastMove}</b>
-            <b>💥 Charged: ${pk.chargedMove}</b>
-          </div>
-          <div style="background:#f0faf6;padding:10px;border-radius:10px;margin-top:8px;">
-            <div style="font-weight:800;color:#1c7c74;margin-bottom:4px;">APPRAISAL: ${iv.label}</div>
-            <div style="font-size:11px;font-weight:700;color:#254a52;">
-              ATTACK: ${pk.ivAtk}/15 • DEFENSE: ${pk.ivDef}/15 • HP: ${pk.ivSta}/15
-            </div>
-          </div>
-        </div>
-      </div>`;
-    openModal(pk.name.toUpperCase(), html);
-  }
-
-  // 2. Modal POKÉDEX Com Banners Regionais e SILHUETA 3D ESCURA para Pokémons Não Encontrados (Ref: 22.18.12.jpeg)
-  function showPokedexModal(page = 0) {
-    const prof = S.getProfile();
-    const perPage = 36;
-    const startId = page * perPage + 1;
-    const endId = Math.min(1025, startId + perPage - 1);
-    const totalCaught = Object.keys(prof.pokedexCaught).length;
-
-    let html = `
-      <div class="pogo-region-banner">
-        <div>
-          <div class="pogo-region-title">NATIONAL DEX</div>
-          <div class="pogo-region-sub">Caught: ${totalCaught} / 1025</div>
-        </div>
-        <button class="pogo-pill-btn" style="padding:8px 14px;font-size:11px;"
-          onclick="window.PokeGameUI.syncCurrentPageWiki(${startId}, ${endId}, ${page})">
-          🌐 SYNC WIKI
-        </button>
-      </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <button class="pogo-pill-btn secondary" style="padding:6px 14px;" ${page === 0 ? "disabled" : ""}
-          onclick="window.PokeGameUI.showPokedexModal(${page - 1})">◀ PREV</button>
-        <b style="font-size:13px;">#${startId} – #${endId}</b>
-        <button class="pogo-pill-btn secondary" style="padding:6px 14px;" ${endId >= 1025 ? "disabled" : ""}
-          onclick="window.PokeGameUI.showPokedexModal(${page + 1})">NEXT ▶</button>
-      </div>
-      <div class="pogo-3col-grid">`;
-
-    for (let id = startId; id <= endId; ++id) {
-      const sp = D.getSpecies(id);
-      const caughtCount = prof.pokedexCaught[id] || 0;
-      const isUnseen = caughtCount === 0;
-      // Se ainda não encontrou o Pokémon, gera a SILHUETA 3D ESCURA do monstro!
-      const imgSrc = E.getPokemonCardImageSrc(id, false, isUnseen);
-
-      html += `<div class="pogo-mon-cell" onclick="window.PokeAudio.playPokemonCry(${id})">
-        <div class="pogo-cp-top">#${id}</div>
-        <img class="pogo-mon-img" src="${imgSrc}" alt="${sp.name}"/>
-        <div class="pogo-mon-name">${isUnseen ? "???" : sp.name}</div>
-        <div style="font-size:10px;color:#7a9a9e;font-weight:700;">${isUnseen ? sp.types.join("/") : `Caught: ${caughtCount}`}</div>
-      </div>`;
-    }
-    html += `</div>`;
-    openModal("POKÉDEX", html);
-  }
-
-  // 3. Modal NEARBY TRACKER (Anéis Azuis Concentricos + Silhuetas 3D igual à Ref 22.18.13 (1).jpeg!)
-  function showNearbyTrackerModal() {
-    const prof = S.getProfile();
-    let html = `
-      <div style="display:flex;justify-content:space-around;font-size:12px;font-weight:800;color:#7a9a9e;margin-bottom:16px;border-bottom:1px solid #d5ebe4;padding-bottom:8px;">
-        <span style="color:#254a52;border-bottom:3px solid #254a52;padding-bottom:6px;">POKÉMON</span>
-        <span onclick="window.PokeGameUI.showBattleHubModal()" style="cursor:pointer;">RAID</span>
-        <span onclick="window.PokeGameUI.triggerAnomalyScanner()" style="cursor:pointer;">ANOMALY</span>
-      </div>
-      <div class="pogo-3col-grid">`;
-
-    for (let i = 0; i < wildSpawns.length; ++i) {
-      const w = wildSpawns[i];
-      const isUncaught = !prof.pokedexCaught[w.data.speciesId];
-      const imgSrc = E.getPokemonCardImageSrc(w.data.speciesId, w.data.isShiny, isUncaught);
-      html += `<div class="nearby-ring-cell" onclick="window.PokeGameUI.closeModal();window.PokeGameUI.enterArEncounterWithWild(${i});">
-        <div class="nearby-blue-disc">
-          <img src="${imgSrc}" alt="${w.species.name}"/>
-        </div>
-        <div style="font-size:11px;font-weight:800;margin-top:8px;color:#254a52;">
-          ${isUncaught ? "???" : w.species.name}
-        </div>
-      </div>`;
-    }
-    html += `</div>`;
-    openModal("NEARBY", html);
-  }
-
-  // 4. Modal PERFIL DO TREINADOR & MEDALHAS (Ref: 22.18.10 (1).jpeg & 22.18.09 (2).jpeg)
-  function showTrainerProfileModal() {
-    const prof = S.getProfile();
-    const buddy = prof.pokemonBox.find(p => p.uid === prof.buddyUid) || prof.pokemonBox[0];
-    const buddyImg = buddy ? E.getPokemonCardImageSrc(buddy.speciesId, buddy.isShiny, false) : "";
-    const xpNeeded = prof.level < 50 ? (prof.level * 1200) : 65000;
-    const xpPct = Math.min(100, Math.round((prof.xp / xpNeeded) * 100));
-
-    let html = `
-      <div class="pogo-white-card" style="text-align:center;">
-        <div style="display:flex;justify-content:center;align-items:center;gap:16px;margin-bottom:10px;">
-          <div>
-            <h2 style="font-size:22px;color:#254a52;">${prof.trainerName}</h2>
-            <div style="font-size:13px;font-weight:800;color:#1c8c82;">& ${buddy ? buddy.name : "Pikachu"} 💛</div>
-          </div>
-          ${buddyImg ? `<img src="${buddyImg}" style="width:92px;height:92px;object-fit:contain;"/>` : ""}
-        </div>
-
-        <div style="text-align:left;margin:10px 0;">
-          <div style="display:flex;justify-content:space-between;font-weight:800;">
-            <span style="font-size:24px;color:#2563eb;">${prof.level} <small style="font-size:11px;">LEVEL</small></span>
-            <span style="font-size:12px;color:#5a8288;">${prof.xp} / ${xpNeeded} XP</span>
-          </div>
-          <div style="width:100%;height:8px;background:#dbeafe;border-radius:4px;overflow:hidden;margin-top:4px;">
-            <div style="width:${xpPct}%;height:100%;background:#3b82f6;"></div>
-          </div>
-        </div>
-
-        <div style="margin-top:14px;padding-top:12px;border-top:1px solid #e5f0ec;text-align:left;font-size:13px;font-weight:700;">
-          <div style="text-align:center;font-size:11px;color:#7a9a9e;letter-spacing:1px;margin-bottom:8px;">TOTAL ACTIVITY</div>
-          <div style="display:flex;justify-content:space-between;padding:5px 0;"><span>👣 Distance Walked</span><b>${((prof.distanceWalkedM || 0)/1000).toFixed(2)} km</b></div>
-          <div style="display:flex;justify-content:space-between;padding:5px 0;"><span>🔴 Pokémon Caught</span><b>${prof.stats.totalCaught}</b></div>
-          <div style="display:flex;justify-content:space-between;padding:5px 0;"><span>🪙 PokéCoins</span><b>${prof.pokecoins}</b></div>
-        </div>
-      </div>
-
-      <div style="text-align:center;font-size:12px;font-weight:800;color:#7a9a9e;letter-spacing:1px;margin:14px 0 8px;">MEDALS</div>
-      <div class="pogo-3col-grid">`;
-
-    for (const tName of Object.keys(D.TYPE_COLORS)) {
-      const m = D.getTypeMedalInfo(prof, tName);
-      html += `<div class="pogo-mon-cell">
-        <div style="font-size:26px;">${m.icon}</div>
-        <div class="pogo-mon-name">${tName}</div>
-        <div style="font-size:10px;color:#1c8c82;font-weight:800;">${m.tier} (${m.count})</div>
-      </div>`;
-    }
-    html += `</div>`;
-    openModal("ME", html);
-  }
-
-  function showRareProgressAndMedalsModal() {
-    showTrainerProfileModal();
-  }
-
-  // 5. Modal SHOP (Ref: 22.18.10 (3).jpeg — Daily Free Box + Itens por PokéCoins Grátis!)
-  function showShopModal() {
-    const prof = S.getProfile();
-    const html = `
-      <div style="text-align:center;margin-bottom:14px;">
-        <div style="font-size:24px;font-weight:800;color:#254a52;">🪙 ${prof.pokecoins}</div>
-        <div style="font-size:11px;color:#7a9a9e;font-weight:700;">100% FREE POKÉCOINS (EARNED IN GYMS & PASS)</div>
-      </div>
-      <div class="pogo-white-card" style="text-align:center;">
-        <div style="font-size:38px;">🎁</div>
-        <div style="font-weight:800;margin:6px 0;">DAILY FREE BOX</div>
-        <button class="pogo-pill-btn" onclick="window.PokeGameUI.claimDailyFreeBox()">CLAIM FREE</button>
-      </div>
-      <div class="pogo-3col-grid">
-        <div class="pogo-mon-cell" onclick="window.PokeGameUI.buyWithFreeCoins('poke_ball', 20, 50)">
-          <div style="font-size:28px;">🔴</div>
-          <div class="pogo-mon-name">20 Poké Balls</div>
-          <div style="font-size:12px;font-weight:800;color:#1c8c82;margin-top:4px;">🪙 50</div>
-        </div>
-        <div class="pogo-mon-cell" onclick="window.PokeGameUI.buyWithFreeCoins('ultra_ball', 10, 80)">
-          <div style="font-size:28px;">🟡</div>
-          <div class="pogo-mon-name">10 Ultra Balls</div>
-          <div style="font-size:12px;font-weight:800;color:#1c8c82;margin-top:4px;">🪙 80</div>
-        </div>
-        <div class="pogo-mon-cell" onclick="window.PokeGameUI.buyWithFreeCoins('incense', 2, 60)">
-          <div style="font-size:28px;">🌸</div>
-          <div class="pogo-mon-name">2 Incense</div>
-          <div style="font-size:12px;font-weight:800;color:#1c8c82;margin-top:4px;">🪙 60</div>
-        </div>
-      </div>`;
-    openModal("SHOP", html);
-  }
-
-  function claimDailyFreeBox() {
-    const prof = S.getProfile();
-    prof.bag.poke_ball = (prof.bag.poke_ball || 0) + 10;
-    prof.bag.razz_berry = (prof.bag.razz_berry || 0) + 5;
-    prof.stardust += 500;
-    S.save();
-    A.playGotchaFanfare();
-    S.showToast("🎁 Daily Free Box resgatada! +10 Poké Balls, +5 Razz Berries e +500 Stardust!", "info");
-    closeModal();
-  }
-
-  function buyWithFreeCoins(itemKey, qty, cost) {
-    const prof = S.getProfile();
-    if (prof.pokecoins < cost) {
-      S.showToast("⚠️ PokéCoins insuficientes! Vença Ginásios ou suba de nível.", "warn");
-      return;
-    }
-    prof.pokecoins -= cost;
-    prof.bag[itemKey] = (prof.bag[itemKey] || 0) + qty;
-    S.save();
-    A.playGotchaFanfare();
-    S.showToast(`🛍️ Adquirido +${qty} ${D.ITEMS_CATALOG[itemKey].name}!`, "info");
-    showShopModal();
-  }
-
-  // 6. Modal ITEMS BAG (Ref: 22.18.10 (2).jpeg)
-  function showBagModal(filterCat = null) {
-    const prof = S.getProfile();
-    let html = `<div style="display:flex;flex-direction:column;gap:10px;">`;
-    for (const key of Object.keys(D.ITEMS_CATALOG)) {
-      const it = D.ITEMS_CATALOG[key];
-      if (filterCat && it.cat !== filterCat) continue;
-      const count = prof.bag[key] || 0;
-      html += `<div class="pogo-white-card" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0;">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <span style="font-size:28px;">${it.icon}</span>
-          <div>
-            <div style="font-weight:800;font-size:14px;">${it.name} <span style="color:#1c8c82;">x${count}</span></div>
-            <div style="font-size:11px;color:#5a8288;">${it.desc}</div>
-          </div>
-        </div>
-        <button class="pogo-pill-btn" style="padding:8px 14px;font-size:11px;" onclick="window.PokeGameUI.useBagItem('${key}')">USE</button>
-      </div>`;
-    }
-    html += `</div>`;
-    openModal("ITEMS", html);
-  }
-
-  function useBagItem(itemKey) {
-    const prof = S.getProfile();
-    if ((prof.bag[itemKey] || 0) <= 0) {
-      S.showToast("⚠️ Você não possui este item!", "warn");
-      return;
-    }
-    const it = D.ITEMS_CATALOG[itemKey];
-    if (it.cat === "ball") {
-      activeBallType = itemKey;
-      S.showToast(`${it.icon} ${it.name} equipada!`, "info");
-      closeModal();
-    } else if (it.cat === "berry") {
-      const w = wildSpawns[activeWildIdx] || wildSpawns[0];
-      if (!w || w.berryApplied) {
-        S.showToast("⚠️ Já há uma fruta ativa neste Pokémon!", "warn");
-        return;
-      }
-      prof.bag[itemKey]--;
-      w.berryApplied = itemKey;
-      if (it.calm) w.calmedByNanab = true;
-      S.save();
-      S.showToast(`${it.icon} ${it.name} aplicada em ${w.species.name}!`, "info");
-      closeModal();
-    } else if (itemKey === "incense") {
-      prof.bag.incense--;
-      spawnWildWave(false);
-      S.save();
-      S.showToast("🌸 Incense ativado! Novos Pokémons surgiram no Mapa!", "info");
-      closeModal();
+    if (Math.random() <= totalChance || activeBallType === "master_ball") {
+      ball.shakeTarget = 4; // 3 shakes + Gotcha!
     } else {
-      prof.bag[itemKey]--;
-      S.addXp(250);
-      S.save();
-      S.showToast(`${it.icon} ${it.name} usado!`, "info");
-      showBagModal();
+      ball.shakeTarget = 1 + Math.floor(Math.random() * 2);
     }
   }
 
-  // 7. Modal GO BATTLE LEAGUE & RAIDS + ARENA DE BATALHA 3D AO VIVO!
-  function showBattleHubModal() {
-    const prof = S.getProfile();
-    const html = `
+  function completePokemonCapture() {
+    ball.state = 4;
+    window.PokeAudio.playGotchaFanfare();
+
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+    const sp = window.PokeData.getSpecies(wildMon.speciesId);
+
+    const isNewDex = !p.pokedexCaught[wildMon.speciesId];
+    p.pokedexCaught[wildMon.speciesId] = (p.pokedexCaught[wildMon.speciesId] || 0) + 1;
+    p.pokemonBox.push(wildMon);
+    p.stats.totalCaught++;
+    if (p.tasksProgress) {
+      p.tasksProgress.caught = (p.tasksProgress.caught || 0) + 1;
+      p.tasksProgress.throws = (p.tasksProgress.throws || 0) + 1;
+    }
+
+    for (const t of sp.types) {
+      p.typeCounts = p.typeCounts || {};
+      p.typeCounts[t] = (p.typeCounts[t] || 0) + 1;
+    }
+    p.anomalyCharge = Math.min(100, (p.anomalyCharge || 0) + 12);
+
+    if (ball.spinRpm > 0.35) p.stats.curveballsLanded++;
+
+    const candyMult = (activeBerry === "pinap_berry" ? 2 : 1) * (cfg.candyMultiplier || 1);
+    const candyGain = Math.round(3 * candyMult);
+    p.candies[wildMon.speciesId] = (p.candies[wildMon.speciesId] || 0) + candyGain;
+
+    const dustGain = Math.round((100 + (isNewDex ? 200 : 0)) * (cfg.stardustMultiplier || 1));
+    p.stardust += dustGain;
+
+    let xpBase = 100 + (isNewDex ? 500 : 0) + (ball.spinRpm > 0.35 ? 50 : 0);
+    if (ball.throwBonusLabel.includes("EXCELLENT")) xpBase += 1000;
+    else if (ball.throwBonusLabel.includes("GREAT")) xpBase += 150;
+    const xpGain = window.PokeStorage.addXp(xpBase);
+
+    updateHud();
+
+    openModal("🎉 GOTCHA! POKÉMON CAPTURADO!", `
       <div class="pogo-white-card" style="text-align:center;">
-        <div style="font-size:13px;font-weight:800;color:#1c8c82;letter-spacing:1px;">GO BATTLE LEAGUE (AO VIVO 3D)</div>
-        <div style="font-size:12px;color:#5a8288;margin:4px 0 12px;">Wins: ${prof.stats.gymsWon + prof.stats.raidsWon} • Stardust Earned: ${prof.stardust}</div>
-        <button class="pogo-pill-btn" style="width:100%;" onclick="window.PokeGameUI.startBattle('GYM', 26, 1850)">
-          ⚔️ GREAT LEAGUE / GYM BATTLE (+50 🪙)
-        </button>
-      </div>
-      <div class="pogo-white-card" style="text-align:center;">
-        <div style="font-size:13px;font-weight:800;color:#e11d48;letter-spacing:1px;">5-STAR LEGENDARY RAIDS (AO VIVO 3D)</div>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px;">
-          <button class="pogo-pill-btn" onclick="window.PokeGameUI.startBattle('RAID', 150, 4200)">👹 RAID: MEWTWO (CP 4200)</button>
-          <button class="pogo-pill-btn" onclick="window.PokeGameUI.startBattle('RAID', 384, 4500)">🐉 RAID: RAYQUAZA (CP 4500)</button>
-          <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.startBattle('VILLAIN', 94, 2100)">🎈 TEAM ROCKET BALLOON (GENGAR)</button>
+        <img src="${E.getPokemonCardImageSrc(wildMon.speciesId, false, wildMon.isShiny)}" style="width:96px;height:96px;object-fit:contain;"/>
+        <h3 style="color:#1c7c74;margin:4px 0;">
+          ${wildMon.isShiny ? "✨ SHINY " : ""}${wildMon.name} (CP ${wildMon.cp})
+        </h3>
+        <p style="font-size:12px;color:#527a80;font-weight:700;">
+          ${isNewDex ? "🆕 NOVO REGISTRO NA POKÉDEX!" : "Capturado com sucesso!"}
+        </p>
+        <div class="stat-capsules-row">
+          <div><div class="stat-cap-val">+${xpGain}</div><div class="stat-cap-lbl">XP & GO Pass</div></div>
+          <div><div class="stat-cap-val">+${dustGain}</div><div class="stat-cap-lbl">Stardust</div></div>
+          <div><div class="stat-cap-val">+${candyGain}</div><div class="stat-cap-lbl">Candies</div></div>
         </div>
-      </div>`;
-    openModal("BATTLE", html);
+        <div style="font-size:12px;font-weight:800;color:#254a52;margin-bottom:12px;">
+          IVs: ATK ${wildMon.ivAtk} / DEF ${wildMon.ivDef} / STA ${wildMon.ivSta} (${wildMon.ivPercent}%)
+        </div>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+          <button class="pogo-pill-btn" onclick="window.PokeGameUI.closeModal(); window.PokeGameUI.toggleSceneMode('CITY_MAP');">
+            🗺️ Voltar ao Mapa
+          </button>
+          <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.showPokemonDetailSheet('${wildMon.uid}')">
+            🔍 Avaliar IVs
+          </button>
+        </div>
+      </div>
+    `);
   }
 
-  function startBattle(mode, enemySpeciesId, enemyCp) {
+  // ============================================================================
+  // ARENA DE BATALHA 3D AO VIVO EM ASCII (LIVE_BATTLE) + VFX ELEMENTAIS ASCII
+  // ============================================================================
+  function getElementVfxConfig(type) {
+    const map = {
+      Electric: { color: "#fde047", glow: "#f59e0b", icon: "⚡", chars: ["⚡", "*", "+", "#"], style: "LIGHTNING" },
+      Fire:     { color: "#fb923c", glow: "#ef4444", icon: "🔥", chars: ["🔥", "@", "W", "*"], style: "FIREBALL" },
+      Water:    { color: "#38bdf8", glow: "#0284c7", icon: "💧", chars: ["💧", "~", "O", "o"], style: "WAVE" },
+      Grass:    { color: "#4ade80", glow: "#16a34a", icon: "🍃", chars: ["🍃", "%", "/", "*"], style: "LEAF" },
+      Ice:      { color: "#bae6fd", glow: "#0ea5e9", icon: "❄️", chars: ["❄️", "*", "+", "◇"], style: "ICE" },
+      Psychic:  { color: "#f472b6", glow: "#a855f7", icon: "🔮", chars: ["🔮", "@", "◎", "*"], style: "BEAM" },
+      Ghost:    { color: "#c084fc", glow: "#581c87", icon: "👻", chars: ["👻", "#", "@", "~"], style: "SHADOW" },
+      Dragon:   { color: "#818cf8", glow: "#4338ca", icon: "🐉", chars: ["🐉", "✦", "#", "@"], style: "METEOR" }
+    };
+    return map[type] || { color: "#26ccaa", glow: "#0d9488", icon: "💥", chars: ["💥", "*", "#", "@"], style: "STRIKE" };
+  }
+
+  function startLiveBattle(mode, enemySpeciesId, enemyCp, title, rewardCoins = 35, rewardDust = 900, isRaid = false) {
+    const p = window.PokeStorage.getProfile();
+    if (!p.pokemonBox.length) return;
     closeModal();
     closeRadialMenu();
-    const prof = S.getProfile();
-    const myPk = prof.pokemonBox[0];
-    const enemySp = D.getSpecies(enemySpeciesId);
-    const mySp = D.getSpecies(myPk.speciesId);
 
-    battleState = {
-      mode,
-      playerPk: myPk,
-      playerSpecies: mySp,
-      playerHp: myPk.maxHp || 140,
-      playerMaxHp: myPk.maxHp || 140,
-      playerEnergy: 0,
-      playerLunge: 0,
-      playerHitFlash: 0,
-      playerDodgeX: 0,
-      playerShieldTimer: 0,
-      shieldsLeft: 2,
-      lastPlayerAttackAt: 0,
+    const bestMon = [...p.pokemonBox].sort((a, b) => b.cp - a.cp)[0];
+    const enemySp = window.PokeData.getSpecies(enemySpeciesId);
+    E.getPokemonMesh(bestMon.speciesId, bestMon.isShiny);
+    E.getPokemonMesh(enemySp.id, false);
 
-      enemySpecies: enemySp,
-      enemyCp,
-      enemyMaxHp: Math.round(180 + enemyCp * 0.055),
-      enemyHp: Math.round(180 + enemyCp * 0.055),
-      enemyEnergy: 0,
-      enemyLunge: 0,
-      enemyHitFlash: 0,
-      enemyAttackTimer: 0.4,
-      enemyChargingSpecial: false,
-      enemySpecialTimer: 0,
+    liveBattle.active = true;
+    liveBattle.mode = mode;
+    liveBattle.title = title;
+    liveBattle.timerSec = isRaid ? 150 : 100;
+    liveBattle.lastTickTime = performance.now();
 
-      camShake: 0,
-      specialCineTimer: 0,
-      specialCineSide: null, // "player" ou "enemy"
-      specialCineMove: null,
-      vfxProjectiles: [],    // Projéteis, feixes, raios, chamas e explosões ASCII
-      floatingTexts: [],     // Números de dano flutuantes (-38, SUPER EFFECTIVE!)
-      bannerMsg: `⚔️ ${myPk.name} vs ${enemySp.name}! Toque na tela para atacar e esquive dos especiais!`
+    liveBattle.playerMon = bestMon;
+    liveBattle.playerMaxHp = Math.max(90, bestMon.maxHp * 2);
+    liveBattle.playerHp = liveBattle.playerMaxHp;
+    liveBattle.playerEnergy = 0;
+    liveBattle.playerShields = 2;
+    liveBattle.shieldActiveUntil = 0;
+    liveBattle.dodgeOffsetX = 0;
+    liveBattle.dodgeUntil = 0;
+    liveBattle.playerAttackAnimUntil = 0;
+
+    liveBattle.enemyMon = {
+      speciesId: enemySp.id,
+      name: enemySp.name,
+      cp: enemyCp,
+      types: enemySp.types,
+      fastMove: enemySp.fastMoves[0],
+      chargedMove: enemySp.chargedMoves[0]
     };
+    liveBattle.enemyMaxHp = Math.max(130, Math.round(enemyCp * 0.14));
+    liveBattle.enemyHp = liveBattle.enemyMaxHp;
+    liveBattle.enemyNextAttackAt = performance.now() + 1800;
+    liveBattle.enemyIsChargingSpecial = false;
+    liveBattle.enemySpecialFireAt = 0;
+    liveBattle.enemyAttackAnimUntil = 0;
 
-    gameScene = "LIVE_BATTLE";
-    document.getElementById("map-overworld-hud").style.display = "none";
-    document.getElementById("ar-encounter-hud").style.display = "none";
-    document.getElementById("live-battle-hud").style.display = "block";
+    liveBattle.vfxList = [];
+    liveBattle.floatingTexts = [];
+    liveBattle.rewardCoins = rewardCoins;
+    liveBattle.rewardDust = rewardDust;
+    liveBattle.rewardXp = isRaid ? 2500 : 1200;
+    liveBattle.isRaidEncounter = isRaid;
 
-    A.playPokemonCry(enemySpeciesId);
+    toggleSceneMode("LIVE_BATTLE");
     updateLiveBattleHudButtons();
-  }
-
-  function fleeLiveBattle() {
-    battleState = null;
-    document.getElementById("live-battle-hud").style.display = "none";
-    toggleSceneMode("CITY_MAP");
+    window.PokeAudio.playPokemonCry(enemySp.id);
+    window.PokeStorage.showToast(`⚔️ BATALHA 3D EM ASCII: ${bestMon.name} vs ${enemySp.name}! Toque na tela para atacar!`, "info");
   }
 
   function updateLiveBattleHudButtons() {
-    if (!battleState) return;
-    const b = battleState;
-    const cm = D.CHARGED_MOVES[b.playerPk.chargedMove] || D.CHARGED_MOVES.Thunderbolt;
-    const st = ELEMENTAL_VFX_STYLE[cm.type] || ELEMENTAL_VFX_STYLE.Normal;
-    const pct = Math.min(100, Math.round((b.playerEnergy / cm.energyCost) * 100));
-    const ready = pct >= 100;
+    const btnCharged = document.getElementById("btn-live-charged");
+    const lblIcon = document.getElementById("lbl-charged-icon");
+    const lblName = document.getElementById("lbl-charged-name");
+    const lblPct = document.getElementById("lbl-charged-pct");
+    const btnShield = document.getElementById("btn-live-shield");
 
-    const btnC = document.getElementById("btn-live-charged");
-    const lblI = document.getElementById("lbl-charged-icon");
-    const lblN = document.getElementById("lbl-charged-name");
-    const lblP = document.getElementById("lbl-charged-pct");
-    if (btnC && lblI && lblN && lblP) {
-      lblI.textContent = st.icon;
-      lblN.textContent = cm.name.slice(0, 10).toUpperCase();
-      lblP.textContent = ready ? "PRONTO!" : `${pct}%`;
-      btnC.style.background = ready
-        ? `linear-gradient(135deg, ${st.color}, ${st.glow})`
-        : `conic-gradient(${st.glow} ${pct}%, rgba(30,41,59,0.88) ${pct}%)`;
-      btnC.style.transform = ready ? "scale(1.10)" : "scale(1.0)";
+    if (!liveBattle.playerMon) return;
+    const sp = window.PokeData.getSpecies(liveBattle.playerMon.speciesId);
+    const vfx = getElementVfxConfig(sp.types[0]);
+    const energy = Math.min(100, Math.round(liveBattle.playerEnergy));
+
+    if (lblIcon) lblIcon.textContent = vfx.icon;
+    if (lblName) lblName.textContent = (liveBattle.playerMon.chargedMove || "ESPECIAL").slice(0, 10).toUpperCase();
+    if (lblPct) lblPct.textContent = energy >= 100 ? "PRONTO!" : `${energy}%`;
+    if (btnCharged) {
+      btnCharged.style.opacity = energy >= 100 ? "1.0" : "0.72";
+      btnCharged.style.transform = energy >= 100 ? "scale(1.08)" : "scale(1.0)";
+    }
+    if (btnShield) {
+      btnShield.textContent = `🛡️${liveBattle.playerShields}`;
+      btnShield.style.opacity = liveBattle.playerShields > 0 ? "1.0" : "0.45";
+    }
+  }
+
+  function spawnBattleAsciiVfx(fromPlayer, elemType, isSpecial) {
+    const vfx = getElementVfxConfig(elemType);
+    const startX = fromPlayer ? canvas.width * 0.34 : canvas.width * 0.62;
+    const startY = fromPlayer ? canvas.height * 0.65 : canvas.height * 0.36;
+    const endX   = fromPlayer ? canvas.width * 0.62 : canvas.width * 0.34;
+    const endY   = fromPlayer ? canvas.height * 0.36 : canvas.height * 0.65;
+
+    liveBattle.vfxList.push({
+      fromPlayer,
+      isSpecial,
+      color: vfx.color,
+      glow: vfx.glow,
+      chars: vfx.chars,
+      startX, startY, endX, endY,
+      progress: 0.0,
+      speed: isSpecial ? 1.85 : 3.4
+    });
+  }
+
+  function addBattleFloatingText(text, x, y, color = "#fde047", size = 18) {
+    liveBattle.floatingTexts.push({ text, x, y, color, size, life: 1.0 });
+  }
+
+  function triggerPlayerAttack(isCharged = false) {
+    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active) return;
+    const now = performance.now();
+    const pMon = liveBattle.playerMon;
+    const eMon = liveBattle.enemyMon;
+    const pSp = window.PokeData.getSpecies(pMon.speciesId);
+    const elemType = pSp.types[0];
+
+    if (isCharged) {
+      if (liveBattle.playerEnergy < 100) {
+        window.PokeStorage.showToast(`⚡ Energia em ${Math.round(liveBattle.playerEnergy)}%! Continue atacando para encher 100%!`, "info");
+        return;
+      }
+      liveBattle.playerEnergy = 0;
+      liveBattle.playerAttackAnimUntil = now + 450;
+      window.PokeAudio.playAttack(true);
+      spawnBattleAsciiVfx(true, elemType, true);
+
+      const dmg = Math.max(26, Math.round((pMon.cp / 24) * (1.2 + pMon.ivAtk / 30)));
+      liveBattle.enemyHp = Math.max(0, liveBattle.enemyHp - dmg);
+      addBattleFloatingText(`💥 ${pMon.chargedMove.toUpperCase()}! -${dmg}`, canvas.width * 0.60, canvas.height * 0.26, "#fde047", 22);
+    } else {
+      liveBattle.playerEnergy = Math.min(100, liveBattle.playerEnergy + 14);
+      liveBattle.playerAttackAnimUntil = now + 240;
+      window.PokeAudio.playAttack(false);
+      spawnBattleAsciiVfx(true, elemType, false);
+
+      const dmg = Math.max(6, Math.round((pMon.cp / 82) * (1.0 + pMon.ivAtk / 45)));
+      liveBattle.enemyHp = Math.max(0, liveBattle.enemyHp - dmg);
+      addBattleFloatingText(`-${dmg}`, canvas.width * 0.62 + (Math.random() - 0.5) * 40, canvas.height * 0.32, "#ffffff", 16);
     }
 
-    const btnS = document.getElementById("btn-live-shield");
-    if (btnS) {
-      btnS.textContent = `🛡️${b.shieldsLeft}`;
-      btnS.style.opacity = b.shieldsLeft > 0 ? "1" : "0.45";
+    updateLiveBattleHudButtons();
+    if (liveBattle.enemyHp <= 0) {
+      finishLiveBattle(true);
     }
   }
 
   function triggerBattleDodge(dir = 1) {
-    if (!battleState || battleState.specialCineTimer > 0) return;
-    A.playUiClick();
-    battleState.playerDodgeX = dir * 1.0;
-    battleState.floatingTexts.push({
-      x: canvas.width * 0.28, y: canvas.height * 0.62,
-      text: "💨 ESQUIVOU!", color: "#38bdf8", life: 0.75, big: false
-    });
+    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active) return;
+    window.PokeAudio.playUiClick();
+    liveBattle.dodgeOffsetX = dir >= 0 ? 1 : -1;
+    liveBattle.dodgeUntil = performance.now() + 650;
+    addBattleFloatingText("💨 ESQUIVOU!", canvas.width * 0.34, canvas.height * 0.56, "#38bdf8", 18);
   }
 
   function triggerBattleShield() {
-    if (!battleState || battleState.shieldsLeft <= 0 || battleState.playerShieldTimer > 0) return;
-    A.playGotchaFanfare();
-    battleState.shieldsLeft--;
-    battleState.playerShieldTimer = 3.0;
-    battleState.floatingTexts.push({
-      x: canvas.width * 0.28, y: canvas.height * 0.58,
-      text: "🛡️ ESCUDO PROTETOR ATIVO!", color: "#c084fc", life: 1.1, big: true
-    });
+    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active) return;
+    if (liveBattle.playerShields <= 0) {
+      window.PokeStorage.showToast("🛡️ Você já usou seus 2 Escudos Protetores!", "warn");
+      return;
+    }
+    window.PokeAudio.playUiClick();
+    liveBattle.playerShields--;
+    liveBattle.shieldActiveUntil = performance.now() + 3500;
     updateLiveBattleHudButtons();
+    addBattleFloatingText("🛡️ ESCUDO 3D ATIVO!", canvas.width * 0.34, canvas.height * 0.54, "#c084fc", 20);
   }
 
-  // Dispara Ataque Rápido ou Especial Carregado com Efeitos Visuais (VFX) Elementais Genéricos!
-  function triggerPlayerAttack(useCharged = false) {
-    if (!battleState || battleState.specialCineTimer > 0) return;
-    const b = battleState;
+  function fleeLiveBattle() {
+    liveBattle.active = false;
+    toggleSceneMode("CITY_MAP");
+  }
+
+  function finishLiveBattle(playerWon) {
+    liveBattle.active = false;
+    const p = window.PokeStorage.getProfile();
+
+    if (playerWon) {
+      window.PokeAudio.playGotchaFanfare();
+      p.pokecoins += liveBattle.rewardCoins;
+      p.stardust += liveBattle.rewardDust;
+      window.PokeStorage.addXp(liveBattle.rewardXp);
+      if (p.tasksProgress) {
+        p.tasksProgress.raids = (p.tasksProgress.raids || 0) + 1;
+      }
+
+      if (liveBattle.isRaidEncounter) {
+        p.stats.raidsWon++;
+        const bossId = liveBattle.enemyMon.speciesId;
+        window.PokeStorage.showToast(`🏆 BOSS DERROTADO! +${liveBattle.rewardCoins} PokéCoins! Capture o Boss em ASCII 3D!`, "success");
+        spawnWildPokemon(bossId, true);
+        toggleSceneMode("AR_CAPTURE");
+      } else {
+        p.stats.gymsWon++;
+        toggleSceneMode("CITY_MAP");
+        openModal("🏆 VITÓRIA NA ARENA 3D ASCII!", `
+          <div class="pogo-white-card" style="text-align:center;">
+            <img src="${E.getPokemonCardImageSrc(liveBattle.playerMon.speciesId, false, liveBattle.playerMon.isShiny)}" style="width:92px;height:92px;"/>
+            <h3 style="color:#1c7c74;margin:6px 0;">${liveBattle.title} VENCIDO!</h3>
+            <div class="stat-capsules-row">
+              <div><div class="stat-cap-val">+${liveBattle.rewardCoins}</div><div class="stat-cap-lbl">🪙 PokéCoins</div></div>
+              <div><div class="stat-cap-val">+${liveBattle.rewardDust}</div><div class="stat-cap-lbl">✨ Stardust</div></div>
+              <div><div class="stat-cap-val">+${liveBattle.rewardXp}</div><div class="stat-cap-lbl">⭐ XP</div></div>
+            </div>
+            <button class="pogo-pill-btn" onclick="window.PokeGameUI.closeModal()">Continuar no Mapa</button>
+          </div>
+        `);
+      }
+    } else {
+      window.PokeAudio.playBreakout();
+      p.stardust += 250;
+      window.PokeStorage.addXp(300);
+      toggleSceneMode("CITY_MAP");
+      window.PokeStorage.showToast("⚔️ Fim do combate! Você ganhou +250 Stardust de participação.", "warn");
+    }
+    updateHud();
+  }
+
+  // Desenha os projéteis elementais em Caracteres ASCII e o HUD de HP da Batalha 3D Ao Vivo
+  function drawLiveBattleAsciiVfxAndHud(timeSec) {
     const now = performance.now();
-    if (!useCharged && now - b.lastPlayerAttackAt < 260) return;
-    b.lastPlayerAttackAt = now;
+    const dt = Math.min(0.08, (now - liveBattle.lastTickTime) / 1000.0);
+    liveBattle.lastTickTime = now;
 
-    const fm = D.FAST_MOVES[b.playerPk.fastMove] || D.FAST_MOVES.QuickAttack;
-    const cm = D.CHARGED_MOVES[b.playerPk.chargedMove] || D.CHARGED_MOVES.Thunderbolt;
-    const move = useCharged ? cm : fm;
-
-    if (useCharged && b.playerEnergy < cm.energyCost) {
-      S.showToast(`⚡ Continue atacando para encher a energia do ${cm.name}!`, "info");
+    liveBattle.timerSec = Math.max(0, liveBattle.timerSec - dt);
+    if (liveBattle.timerSec <= 0) {
+      finishLiveBattle(liveBattle.enemyHp < liveBattle.playerHp);
       return;
     }
 
-    A.playAttack(useCharged);
-    b.playerLunge = 1.0;
+    // IA do Oponente em Tempo Real
+    if (!liveBattle.enemyIsChargingSpecial && now >= liveBattle.enemyNextAttackAt) {
+      if (Math.random() < 0.34) {
+        liveBattle.enemyIsChargingSpecial = true;
+        liveBattle.enemySpecialFireAt = now + 1700;
+        addBattleFloatingText(`⚠️ ${liveBattle.enemyMon.name} CARREGANDO ${liveBattle.enemyMon.chargedMove.toUpperCase()}!`, canvas.width * 0.5, canvas.height * 0.20, "#fb7185", 16);
+      } else {
+        liveBattle.enemyAttackAnimUntil = now + 340;
+        liveBattle.enemyNextAttackAt = now + 1500 + Math.random() * 600;
+        window.PokeAudio.playAttack(false);
+        spawnBattleAsciiVfx(false, liveBattle.enemyMon.types[0], false);
 
-    if (useCharged) {
-      b.playerEnergy = Math.max(0, b.playerEnergy - cm.energyCost);
-      b.specialCineTimer = 1.55;
-      b.specialCineSide = "player";
-      b.specialCineMove = cm;
-      b.bannerMsg = `💥 ${b.playerPk.name.toUpperCase()} LANÇOU ${cm.name.toUpperCase()}!`;
-    } else {
-      b.playerEnergy = Math.min(100, b.playerEnergy + fm.energyGain * 1.6);
-      spawnAttackVfx("player", move, false);
-      applyBattleDamage("enemy", move, false);
-    }
-    updateLiveBattleHudButtons();
-  }
-
-  function spawnAttackVfx(attackerSide, move, isCharged) {
-    if (!battleState) return;
-    const W = canvas.width, H = canvas.height;
-    const st = ELEMENTAL_VFX_STYLE[move.type] || ELEMENTAL_VFX_STYLE.Normal;
-    const fromX = attackerSide === "player" ? W * 0.28 : W * 0.72;
-    const fromY = attackerSide === "player" ? H * 0.62 : H * 0.36;
-    const toX   = attackerSide === "player" ? W * 0.72 : W * 0.28;
-    const toY   = attackerSide === "player" ? H * 0.36 : H * 0.62;
-
-    const count = isCharged ? 36 : 12;
-    for (let i = 0; i < count; ++i) {
-      const ch = st.glyphs[i % st.glyphs.length];
-      battleState.vfxProjectiles.push({
-        fromX, fromY, toX, toY,
-        progress: -(i * (isCharged ? 0.018 : 0.035)),
-        speed: isCharged ? 2.2 : 3.2,
-        spreadX: (Math.random() - 0.5) * (isCharged ? 120 : 38),
-        spreadY: (Math.random() - 0.5) * (isCharged ? 120 : 38),
-        glyph: ch,
-        color: i % 2 === 0 ? st.color : st.glow,
-        size: isCharged ? (18 + (i % 12)) : (14 + (i % 6)),
-        isCharged
-      });
-    }
-  }
-
-  function applyBattleDamage(targetSide, move, isCharged) {
-    if (!battleState) return;
-    const b = battleState;
-    const W = canvas.width, H = canvas.height;
-
-    if (targetSide === "enemy") {
-      const eff = D.getTypeEffectiveness(move.type, b.enemySpecies.types);
-      const rawDmg = (isCharged ? move.power * 0.85 : move.power * 1.9) * eff * (1 + b.playerPk.cp / 1500);
-      const dmg = Math.max(6, Math.round(rawDmg));
-      b.enemyHp = Math.max(0, b.enemyHp - dmg);
-      b.enemyHitFlash = 1.0;
-      b.camShake = isCharged ? 18 : 6;
-
-      const tx = W * 0.72 + (Math.random() - 0.5) * 40;
-      const ty = H * 0.28;
-      b.floatingTexts.push({
-        x: tx, y: ty,
-        text: `-${dmg}`,
-        color: eff > 1.1 ? "#fde047" : "#ffffff",
-        life: 0.95,
-        big: isCharged || eff > 1.1
-      });
-      if (eff > 1.1) {
-        b.floatingTexts.push({ x: tx, y: ty - 22, text: "🔥 SUPER EFFECTIVE!", color: "#fb923c", life: 1.1, big: true });
+        const dodged = now < liveBattle.dodgeUntil;
+        const rawDmg = Math.max(5, Math.round(liveBattle.enemyMon.cp / 95));
+        const dmg = dodged ? Math.max(1, Math.round(rawDmg * 0.25)) : rawDmg;
+        liveBattle.playerHp = Math.max(0, liveBattle.playerHp - dmg);
+        addBattleFloatingText(dodged ? `💨 -${dmg}` : `-${dmg}`, canvas.width * 0.34, canvas.height * 0.58, "#fb7185", 16);
       }
-    } else {
-      // Inimigo atacando o jogador (verifica Escudo Protetor ou Esquiva!)
-      const eff = D.getTypeEffectiveness(move.type, b.playerSpecies.types);
-      let dmg = Math.max(4, Math.round((isCharged ? 38 : 11) * eff * (1 + b.enemyCp / 3200)));
-      const tx = W * 0.28, ty = H * 0.52;
+    } else if (liveBattle.enemyIsChargingSpecial && now >= liveBattle.enemySpecialFireAt) {
+      liveBattle.enemyIsChargingSpecial = false;
+      liveBattle.enemyAttackAnimUntil = now + 500;
+      liveBattle.enemyNextAttackAt = now + 2200;
+      window.PokeAudio.playAttack(true);
+      spawnBattleAsciiVfx(false, liveBattle.enemyMon.types[0], true);
 
-      if (b.playerShieldTimer > 0) {
-        dmg = Math.max(1, Math.round(dmg * 0.10));
-        b.floatingTexts.push({ x: tx, y: ty - 24, text: "🛡️ BLOQUEADO PELO ESCUDO!", color: "#c084fc", life: 1.0, big: true });
-      } else if (Math.abs(b.playerDodgeX) > 0.25) {
-        dmg = Math.max(1, Math.round(dmg * 0.25));
-        b.floatingTexts.push({ x: tx, y: ty - 24, text: "💨 ESQUIVA PARCIAL!", color: "#38bdf8", life: 0.9, big: false });
-      }
-
-      b.playerHp = Math.max(0, b.playerHp - dmg);
-      b.playerHitFlash = 1.0;
-      b.camShake = isCharged ? 15 : 5;
-      b.floatingTexts.push({ x: tx, y: ty, text: `-${dmg}`, color: "#ff4d6d", life: 0.9, big: isCharged });
-    }
-  }
-
-  function updateLiveBattlePhysics(dt) {
-    if (gameScene !== "LIVE_BATTLE" || !battleState) return;
-    const b = battleState;
-
-    b.playerLunge = Math.max(0, b.playerLunge - dt * 3.5);
-    b.enemyLunge = Math.max(0, b.enemyLunge - dt * 3.5);
-    b.playerHitFlash = Math.max(0, b.playerHitFlash - dt * 4.0);
-    b.enemyHitFlash = Math.max(0, b.enemyHitFlash - dt * 4.0);
-    b.playerDodgeX *= Math.pow(0.08, dt);
-    b.playerShieldTimer = Math.max(0, b.playerShieldTimer - dt);
-    b.camShake = Math.max(0, b.camShake - dt * 32);
-
-    // Atualiza Cutscene de Ataque Especial Carregado
-    if (b.specialCineTimer > 0) {
-      const prevT = b.specialCineTimer;
-      b.specialCineTimer = Math.max(0, b.specialCineTimer - dt);
-      if (prevT >= 0.80 && b.specialCineTimer < 0.80) {
-        // No pico da animação especial (0.8s restantes), dispara a tempestade elemental e aplica o dano!
-        spawnAttackVfx(b.specialCineSide, b.specialCineMove, true);
-        applyBattleDamage(b.specialCineSide === "player" ? "enemy" : "player", b.specialCineMove, true);
-      }
-    } else {
-      // IA do Inimigo / Boss de Raid atacando ao vivo em tempo real!
-      b.enemyAttackTimer -= dt;
-      if (b.enemyChargingSpecial) {
-        b.enemySpecialTimer -= dt;
-        if (b.enemySpecialTimer <= 0) {
-          b.enemyChargingSpecial = false;
-          const eCm = D.CHARGED_MOVES[b.enemySpecies.chargedMove] || D.CHARGED_MOVES.ShadowBall;
-          A.playAttack(true);
-          b.enemyLunge = 1.0;
-          b.specialCineTimer = 1.45;
-          b.specialCineSide = "enemy";
-          b.specialCineMove = eCm;
-          b.bannerMsg = `⚠️ ${b.enemySpecies.name.toUpperCase()} DISPAROU ${eCm.name.toUpperCase()}!`;
-        }
-      } else if (b.enemyAttackTimer <= 0) {
-        b.enemyAttackTimer = 1.35 + Math.random() * 0.45;
-        b.enemyEnergy += 24;
-        if (b.enemyEnergy >= 100) {
-          b.enemyEnergy = 0;
-          b.enemyChargingSpecial = true;
-          b.enemySpecialTimer = 1.75; // Dá 1.75s para o jogador ativar o Escudo 🛡️ ou Esquivar 💨!
-          const eCm = D.CHARGED_MOVES[b.enemySpecies.chargedMove] || D.CHARGED_MOVES.ShadowBall;
-          b.bannerMsg = `⚠️ PERIGO: ${b.enemySpecies.name} está carregando ${eCm.name}! Use 🛡️ ESCUDO ou 💨 ESQUIVE!`;
-          S.showToast(`⚠️ ${b.enemySpecies.name} vai lançar ${eCm.name}! Toque em 🛡️ Escudo ou 💨 Esquivar!`, "warn");
-        } else {
-          const eFm = D.FAST_MOVES[b.enemySpecies.fastMove] || D.FAST_MOVES.Tackle;
-          A.playAttack(false);
-          b.enemyLunge = 1.0;
-          spawnAttackVfx("enemy", eFm, false);
-          applyBattleDamage("player", eFm, false);
-        }
-      }
+      const shielded = now < liveBattle.shieldActiveUntil;
+      const dodged = now < liveBattle.dodgeUntil;
+      const rawDmg = Math.max(22, Math.round(liveBattle.enemyMon.cp / 30));
+      const dmg = shielded ? 0 : (dodged ? Math.round(rawDmg * 0.3) : rawDmg);
+      liveBattle.playerHp = Math.max(0, liveBattle.playerHp - dmg);
+      addBattleFloatingText(
+        shielded ? "🛡️ BLOQUEADO (0 DANO)!" : `💥 ${liveBattle.enemyMon.chargedMove.toUpperCase()} -${dmg}`,
+        canvas.width * 0.36, canvas.height * 0.54,
+        shielded ? "#c084fc" : "#ef4444", 20
+      );
     }
 
-    // Atualiza partículas VFX e textos flutuantes
-    for (let i = b.vfxProjectiles.length - 1; i >= 0; --i) {
-      const p = b.vfxProjectiles[i];
-      p.progress += dt * p.speed;
-      if (p.progress >= 1.15) b.vfxProjectiles.splice(i, 1);
+    if (liveBattle.playerHp <= 0) {
+      finishLiveBattle(false);
+      return;
     }
-    for (let i = b.floatingTexts.length - 1; i >= 0; --i) {
-      const ft = b.floatingTexts[i];
-      ft.life -= dt;
-      ft.y -= dt * 38;
-      if (ft.life <= 0) b.floatingTexts.splice(i, 1);
-    }
-
-    // Verifica Vitória ou Derrota
-    if (b.enemyHp <= 0 && b.specialCineTimer <= 0) {
-      const prof = S.getProfile();
-      const coins = B.get().gymCoinReward || 50;
-      prof.pokecoins += coins;
-      prof.stardust += 1000;
-      prof.anomalyCharge = Math.min(100, (prof.anomalyCharge || 0) + 35);
-      S.addXp(1000);
-      prof.stats.gymsWon++;
-      S.save();
-
-      const bossWild = D.rollWeightedSpawn(Object.assign({}, B.get(), { wildIvFloor: 12 }), prof.level + 5);
-      bossWild.speciesId = b.enemySpecies.id;
-      bossWild.name = b.enemySpecies.name;
-      bossWild.cp = D.calculateCP(b.enemySpecies.id, 25, bossWild.ivAtk, bossWild.ivDef, bossWild.ivSta);
-      wildSpawns[0] = {
-        data: bossWild, species: b.enemySpecies,
-        mapX: cityState.playerX, mapZ: cityState.playerZ - 2.5,
-        pos: E.vec3(0, -1.0, -3.4),
-        visualScale: E.computeVisualScale(b.enemySpecies.height_m),
-        jumpOffset: 0, actionTimer: 0,
-        calmedByNanab: false, berryApplied: null, insideBall: false
-      };
-
-      A.playGotchaFanfare();
-      S.showToast(`🏆 VITÓRIA! +${coins} PokéCoins & +1.000 Stardust! Capture ${b.enemySpecies.name}!`, "info");
-      document.getElementById("live-battle-hud").style.display = "none";
-      battleState = null;
-      enterArEncounterWithWild(0);
-      updateHudCounters();
-    } else if (b.playerHp <= 0 && b.specialCineTimer <= 0) {
-      S.showToast(`💫 Seu ${b.playerPk.name} recuou! Fortaleça-o com Power Up e tente novamente.`, "warn");
-      fleeLiveBattle();
-    }
-  }
-
-  // Renderiza a Arena 3D de Batalha Ao Vivo com Câmera Dinâmica, VFX Elementais e Escudo Hexagonal!
-  function renderPokemonGoLiveBattleArena(W, H, timeSec) {
-    if (!battleState) return;
-    const b = battleState;
-
-    const shakeX = (Math.random() - 0.5) * b.camShake;
-    const shakeY = (Math.random() - 0.5) * b.camShake;
 
     ctx.save();
-    ctx.translate(shakeX, shakeY);
-
-    // 1. Fundo do Estádio 3D de Batalha (Escurece dramaticamente durante Ataques Especiais Carregados!)
-    const isCine = b.specialCineTimer > 0;
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
-    bgGrad.addColorStop(0, isCine ? "#060814" : "#111c3d");
-    bgGrad.addColorStop(0.45, isCine ? "#0f172a" : "#1e3a5f");
-    bgGrad.addColorStop(1, isCine ? "#090d16" : "#132a42");
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(-20, -20, W + 40, H + 40);
-
-    // Anéis Holográficos da Arena 3D no chão
-    const enemyBaseX = W * 0.70 - b.enemyLunge * 75;
-    const enemyBaseY = H * 0.38 + b.enemyLunge * 42;
-    const playerBaseX = W * 0.28 + b.playerLunge * 75 + b.playerDodgeX * 85;
-    const playerBaseY = H * 0.66 - b.playerLunge * 42;
-
-    ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.ellipse(enemyBaseX, enemyBaseY + 35, 95, 34, 0, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = "rgba(38, 204, 170, 0.55)";
-    ctx.beginPath(); ctx.ellipse(playerBaseX, playerBaseY + 42, 115, 42, 0, 0, Math.PI * 2); ctx.stroke();
-
-    // Linhas de velocidade / Energia durante Especial Carregado!
-    if (isCine && b.specialCineMove) {
-      const st = ELEMENTAL_VFX_STYLE[b.specialCineMove.type] || ELEMENTAL_VFX_STYLE.Normal;
-      const focusX = b.specialCineSide === "player" ? playerBaseX : enemyBaseX;
-      const focusY = b.specialCineSide === "player" ? playerBaseY : enemyBaseY;
-
-      ctx.save();
-      ctx.strokeStyle = st.glow;
-      ctx.fillStyle = st.color;
-      ctx.font = "bold 18px 'Cascadia Mono', Consolas, monospace";
-      for (let k = 0; k < 20; ++k) {
-        const ang = (k / 20) * Math.PI * 2 + timeSec * 8;
-        const rIn = Math.max(10, (b.specialCineTimer - 0.75) * 190);
-        const rx = focusX + Math.cos(ang) * rIn;
-        const ry = focusY + Math.sin(ang) * rIn * 0.7;
-        ctx.fillText(st.glyphs[k % st.glyphs.length], rx, ry);
-      }
-
-      // Feixe Elemental Gigante atravessando a Arena no momento do disparo (specialCineTimer < 0.85)!
-      if (b.specialCineTimer < 0.85) {
-        const dstX = b.specialCineSide === "player" ? enemyBaseX : playerBaseX;
-        const dstY = b.specialCineSide === "player" ? enemyBaseY : playerBaseY;
-        ctx.strokeStyle = st.glow;
-        ctx.lineWidth = 38 * (b.specialCineTimer / 0.85);
-        ctx.lineCap = "round";
-        ctx.beginPath(); ctx.moveTo(focusX, focusY); ctx.lineTo(dstX, dstY); ctx.stroke();
-
-        ctx.strokeStyle = st.color;
-        ctx.lineWidth = 16 * (b.specialCineTimer / 0.85);
-        ctx.beginPath(); ctx.moveTo(focusX, focusY); ctx.lineTo(dstX, dstY); ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    // 2. Desenha o Pokémon Inimigo / Boss 3D (Fundo-Direita)
-    const enemySize = Math.min(W * 0.42, H * 0.28) * 1.05;
-    const enemyBob = Math.sin(timeSec * 4.5) * 7;
-    const enemySculp = E.getPokemonAscii3DSculpture(b.enemySpecies.id, false, false);
-    ctx.save();
-    ctx.translate(enemyBaseX, enemyBaseY + enemyBob);
-    if (b.enemyChargingSpecial) {
-      // Aura vermelha pulsante avisando que o Inimigo vai soltar Especial!
-      ctx.strokeStyle = "#ef4444";
-      ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.arc(0, 0, enemySize * 0.58 + Math.sin(timeSec * 25) * 8, 0, Math.PI * 2); ctx.stroke();
-    }
-    ctx.drawImage(enemySculp, -enemySize * 0.5, -enemySize * 0.5, enemySize, enemySize);
-    if (b.enemyHitFlash > 0.05) {
-      ctx.globalCompositeOperation = "source-atop";
-      ctx.fillStyle = `rgba(255, 255, 255, ${b.enemyHitFlash * 0.8})`;
-      ctx.fillRect(-enemySize * 0.5, -enemySize * 0.5, enemySize, enemySize);
-    }
-    ctx.restore();
-
-    // 3. Desenha o Seu Pokémon 3D (Frente-Esquerda) + Domo do Escudo Protetor!
-    const playerSize = Math.min(W * 0.46, H * 0.30) * 1.12;
-    const playerBob = Math.cos(timeSec * 5.0) * 8;
-    const playerSculp = E.getPokemonAscii3DSculpture(b.playerPk.speciesId, b.playerPk.isShiny, false);
-    ctx.save();
-    ctx.translate(playerBaseX, playerBaseY + playerBob);
-    ctx.drawImage(playerSculp, -playerSize * 0.5, -playerSize * 0.5, playerSize, playerSize);
-    if (b.playerHitFlash > 0.05) {
-      ctx.globalCompositeOperation = "source-atop";
-      ctx.fillStyle = `rgba(255, 70, 90, ${b.playerHitFlash * 0.75})`;
-      ctx.fillRect(-playerSize * 0.5, -playerSize * 0.5, playerSize, playerSize);
-    }
-    if (b.playerShieldTimer > 0) {
-      ctx.strokeStyle = "rgba(192, 132, 252, 0.92)";
-      ctx.fillStyle = "rgba(168, 85, 247, 0.22)";
-      ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.arc(0, 0, playerSize * 0.58, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    }
-    ctx.restore();
-
-    // 4. Desenha todos os Projéteis e Partículas ASCII dos Ataques Rápidos e Especiais!
-    ctx.save();
-    for (const p of b.vfxProjectiles) {
-      if (p.progress < 0 || p.progress > 1.1) continue;
-      const t = Math.min(1, p.progress);
-      const arc = Math.sin(t * Math.PI) * (p.isCharged ? 45 : 22);
-      const px = p.fromX * (1 - t) + p.toX * t + p.spreadX * Math.sin(t * Math.PI);
-      const py = p.fromY * (1 - t) + p.toY * t - arc + p.spreadY * Math.sin(t * Math.PI);
-
-      ctx.font = `900 ${p.size}px 'Cascadia Mono', Consolas, monospace`;
-      ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 10;
-      ctx.fillText(p.glyph, px, py);
-    }
-    ctx.restore();
-
-    // 5. Barras de HP Estilo Pokémon GO no Topo dos 2 Lutadores + Textos de Dano Flutuantes
-    drawFighterStatusCard(W - 195, 16, b.enemySpecies.name, b.enemyCp, b.enemyHp, b.enemyMaxHp, true);
-    drawFighterStatusCard(68, 16, b.playerPk.name, b.playerPk.cp, b.playerHp, b.playerMaxHp, false);
-
-    // Banner central de ação ao vivo
-    ctx.save();
-    ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
-    ctx.beginPath(); ctx.roundRect(W * 0.5 - 165, 76, 330, 28, 14); ctx.fill();
-    ctx.fillStyle = "#fde047";
-    ctx.font = "800 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    // 1. Projéteis Elementais e Feixes Especiais em Caracteres ASCII!
+    ctx.font = `bold ${cellH + 6}px 'Cascadia Mono', Consolas, monospace`;
     ctx.textAlign = "center";
-    ctx.fillText(b.bannerMsg, W * 0.5, 94);
+    ctx.textBaseline = "middle";
 
-    // Textos flutuantes de dano (-42, SUPER EFFECTIVE!, ESQUIVOU!)
-    for (const ft of b.floatingTexts) {
-      ctx.font = ft.big ? "900 20px -apple-system, sans-serif" : "800 15px -apple-system, sans-serif";
-      ctx.fillStyle = ft.color;
-      ctx.strokeStyle = "#090d16";
-      ctx.lineWidth = 3;
+    for (let i = liveBattle.vfxList.length - 1; i >= 0; --i) {
+      const v = liveBattle.vfxList[i];
+      v.progress += dt * v.speed;
+      if (v.progress >= 1.0) {
+        liveBattle.vfxList.splice(i, 1);
+        continue;
+      }
+      const u = v.progress;
+      const x = v.startX * (1 - u) + v.endX * u;
+      const y = v.startY * (1 - u) + v.endY * u - Math.sin(u * Math.PI) * (v.isSpecial ? 60 : 25);
+
+      const count = v.isSpecial ? 9 : 4;
+      for (let k = 0; k < count; ++k) {
+        const spread = (k - count / 2) * (v.isSpecial ? 14 : 9);
+        const gx = x + spread * Math.cos(timeSec * 12 + k);
+        const gy = y + spread * Math.sin(timeSec * 12 + k);
+        ctx.fillStyle = k % 2 === 0 ? v.color : "#ffffff";
+        ctx.fillText(v.chars[(k + Math.floor(timeSec * 25)) % v.chars.length], gx, gy);
+      }
+    }
+
+    // 2. Textos de Dano Flutuantes
+    for (let i = liveBattle.floatingTexts.length - 1; i >= 0; --i) {
+      const ft = liveBattle.floatingTexts[i];
+      ft.life -= dt * 0.95;
+      ft.y -= dt * 36;
+      if (ft.life <= 0) {
+        liveBattle.floatingTexts.splice(i, 1);
+        continue;
+      }
+      ctx.globalAlpha = Math.max(0, ft.life);
+      ctx.font = `900 ${ft.size}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      ctx.strokeStyle = "#091020";
+      ctx.lineWidth = 3.5;
       ctx.strokeText(ft.text, ft.x, ft.y);
+      ctx.fillStyle = ft.color;
       ctx.fillText(ft.text, ft.x, ft.y);
     }
-    ctx.restore();
+    ctx.globalAlpha = 1.0;
+
+    // 3. Barras Superiores de HP + Cronômetro da Arena 3D
+    const drawHpCard = (x, y, name, cp, hp, maxHp) => {
+      const w = Math.min(200, canvas.width * 0.41), h = 52;
+      ctx.fillStyle = "rgba(15, 25, 48, 0.88)";
+      ctx.strokeStyle = "#26ccaa";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 12);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "800 13px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(`${name} (CP ${cp})`, x + 10, y + 17);
+
+      const pct = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
+      const barCol = pct > 0.5 ? "#22c55e" : (pct > 0.22 ? "#f59e0b" : "#ef4444");
+      ctx.fillStyle = "rgba(255,255,255,0.18)";
+      ctx.fillRect(x + 10, y + 29, w - 20, 10);
+      ctx.fillStyle = barCol;
+      ctx.fillRect(x + 10, y + 29, (w - 20) * pct, 10);
+    };
+
+    drawHpCard(14, 64, liveBattle.playerMon.name, liveBattle.playerMon.cp, liveBattle.playerHp, liveBattle.playerMaxHp);
+    drawHpCard(canvas.width - Math.min(200, canvas.width * 0.41) - 14, 64, liveBattle.enemyMon.name, liveBattle.enemyMon.cp, liveBattle.enemyHp, liveBattle.enemyMaxHp);
+
+    ctx.fillStyle = "rgba(15, 25, 48, 0.9)";
+    ctx.beginPath();
+    ctx.arc(canvas.width * 0.5, 42, 22, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fde047";
+    ctx.font = "900 16px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(`${Math.ceil(liveBattle.timerSec)}`, canvas.width * 0.5, 43);
+
     ctx.restore();
   }
 
-  function drawFighterStatusCard(x, y, name, cp, hp, maxHp, isEnemy) {
-    const pct = Math.max(0, Math.min(100, Math.round((hp / Math.max(1, maxHp)) * 100)));
-    const barCol = pct > 50 ? "#22c55e" : (pct > 22 ? "#eab308" : "#ef4444");
+  // ============================================================================
+  // CUTSCENE 3D DE EVOLUÇÃO COM MORPH DE SILHUETA 100% EM ASCII
+  // ============================================================================
+  function startEvolutionCutscene(monUid, fromSpeciesId, toSpeciesId, fromName, toName, newCp) {
+    closeModal();
+    closeRadialMenu();
+    E.getPokemonMesh(fromSpeciesId, false);
+    E.getPokemonMesh(toSpeciesId, false);
+
+    evoScene.active = true;
+    evoScene.monUid = monUid;
+    evoScene.fromSpeciesId = fromSpeciesId;
+    evoScene.toSpeciesId = toSpeciesId;
+    evoScene.fromName = fromName;
+    evoScene.toName = toName;
+    evoScene.newCp = newCp;
+    evoScene.startTime = performance.now();
+
+    toggleSceneMode("EVOLUTION_CUTSCENE");
+    window.PokeAudio.playPokemonCry(fromSpeciesId);
+  }
+
+  function drawEvolutionAsciiHelixAndHud(timeSec) {
+    const elapsed = (performance.now() - evoScene.startTime) / 1000.0;
+    const progress = Math.min(1.0, elapsed / evoScene.durationSec);
+    const cx = canvas.width * 0.5;
+    const cy = canvas.height * 0.46;
+
     ctx.save();
-    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
-    ctx.beginPath(); ctx.roundRect(x, y, 180, 50, 12); ctx.fill();
-    ctx.strokeStyle = isEnemy ? "#ef4444" : "#26ccaa";
-    ctx.lineWidth = 2;
+    ctx.font = `bold ${cellH + 4}px 'Cascadia Mono', Consolas, monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    // Hélice Dupla 3D de DNA em Caracteres ASCII (A T G C ✦ * +) girando em torno do Pokémon!
+    const dnaChars = ["A", "T", "G", "C", "✦", "*", "+"];
+    for (let i = 0; i < 28; ++i) {
+      const hFrac = (i / 28) - 0.5;
+      const ang = hFrac * 7.5 + timeSec * (3.5 + progress * 8.0);
+      const rad = 115 * (1.0 - Math.min(0.75, progress * 0.8));
+      const x1 = cx + Math.cos(ang) * rad;
+      const x2 = cx - Math.cos(ang) * rad;
+      const y = cy + hFrac * 240;
+
+      ctx.fillStyle = "#38bdf8";
+      ctx.fillText(dnaChars[i % dnaChars.length], x1, y);
+      ctx.fillStyle = "#fde047";
+      ctx.fillText(dnaChars[(i + 3) % dnaChars.length], x2, y);
+    }
+
+    // Supernova ASCII no instante da transformação (progress 0.76 .. 0.86)
+    if (progress > 0.76 && progress < 0.88) {
+      const burstR = ((progress - 0.76) / 0.12) * 220;
+      for (let k = 0; k < 20; ++k) {
+        const a = (k / 20) * Math.PI * 2;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText("✦", cx + Math.cos(a) * burstR, cy + Math.sin(a) * burstR);
+      }
+    }
+
+    // Banner inferior com texto da evolução
+    const cardW = Math.min(390, canvas.width - 28), cardH = 74;
+    const cardX = cx - cardW / 2, cardY = canvas.height - 106;
+    ctx.fillStyle = "rgba(12, 24, 48, 0.92)";
+    ctx.strokeStyle = "#26ccaa";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.roundRect(cardX, cardY, cardW, cardH, 18);
+    ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = "#254a52";
-    ctx.font = "800 13px -apple-system, sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText(`${name} (CP ${cp})`, x + 10, y + 18);
-
-    ctx.fillStyle = "#e2e8f0";
-    ctx.beginPath(); ctx.roundRect(x + 10, y + 25, 160, 9, 4); ctx.fill();
-    ctx.fillStyle = barCol;
-    ctx.beginPath(); ctx.roundRect(x + 10, y + 25, 160 * (pct / 100), 9, 4); ctx.fill();
-
-    ctx.fillStyle = "#64748b";
-    ctx.font = "700 10px -apple-system, sans-serif";
-    ctx.fillText(`HP ${hp} / ${maxHp}`, x + 10, y + 45);
-    ctx.restore();
-  }
-
-  // 8. Modal GO PASS & FIELD RESEARCH (Ref: 22.18.11 (2).jpeg & 22.18.12 (2).jpeg)
-  function showBattlePassModal() {
-    const prof = S.getProfile();
-    const xpPerTier = B.get().battlePassXpPerTier || 1000;
-    const currentTier = Math.floor(prof.battlePassXp / xpPerTier) + 1;
-
-    let html = `
-      <div class="pogo-white-card" style="background:linear-gradient(135deg,#fb923c,#f59e0b);color:#ffffff;text-align:center;">
-        <div style="font-size:16px;font-weight:800;">📦 Field Research & GO Pass</div>
-        <div style="font-size:13px;margin-top:4px;">CURRENT RANK: <b>TIER ${currentTier}</b> (100% Free • Zero Gacha)</div>
-      </div>`;
-
-    const rewards = [
-      { tier: 1,  label: "10x Great Balls + 500 Stardust", item: "great_ball", qty: 10, dust: 500 },
-      { tier: 2,  label: "5x Pinap Berries + 2x Rare Candy", item: "rare_candy", qty: 2, dust: 500 },
-      { tier: 3,  label: "10x Ultra Balls + 1,000 Stardust", item: "ultra_ball", qty: 10, dust: 1000 },
-      { tier: 5,  label: "2x Incense + 1,500 Stardust", item: "incense", qty: 2, dust: 1500 },
-      { tier: 10, label: "🟣 1x MASTER BALL + 5,000 Stardust", item: "master_ball", qty: 1, dust: 5000 }
-    ];
-
-    for (const r of rewards) {
-      const unlocked = currentTier >= r.tier;
-      const claimed = prof.battlePassClaimed.includes(r.tier);
-      html += `<div class="pogo-white-card" style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div style="font-weight:800;color:#1c8c82;">TIER ${r.tier}</div>
-          <div style="font-size:13px;font-weight:700;">${r.label}</div>
-        </div>
-        <button class="pogo-pill-btn ${(!unlocked || claimed) ? "secondary" : ""}" ${(!unlocked || claimed) ? "disabled" : ""}
-          onclick="window.PokeGameUI.claimBattlePassTier(${r.tier}, '${r.item}', ${r.qty}, ${r.dust})">
-          ${claimed ? "CLAIMED ✓" : "CLAIM"}
-        </button>
-      </div>`;
-    }
-    openModal("GO PASS & RESEARCH", html);
-  }
-
-  function claimBattlePassTier(tier, itemKey, qty, dust) {
-    const prof = S.getProfile();
-    if (prof.battlePassClaimed.includes(tier)) return;
-    prof.battlePassClaimed.push(tier);
-    prof.bag[itemKey] = (prof.bag[itemKey] || 0) + qty;
-    prof.stardust += dust;
-    S.save();
-    A.playGotchaFanfare();
-    S.showToast(`🎁 Tier ${tier} resgatado!`, "info");
-    showBattlePassModal();
-  }
-
-  // 9. Modal SETTINGS, SAVE BACKUP, SOM, BUG REPORT & ADMIN
-  function showSystemAndCrowdfundingModal() {
-    const html = `
-      <div class="pogo-white-card">
-        <h3 style="margin-bottom:8px;">🔊 Sound & Music</h3>
-        <div style="display:flex;gap:8px;">
-          <button class="pogo-pill-btn secondary" onclick="window.PokeAudio.toggleSound()">🔊 Toggle SFX</button>
-          <button class="pogo-pill-btn secondary" onclick="window.PokeAudio.toggleBgm()">🎵 Toggle BGM</button>
-        </div>
-      </div>
-
-      <div class="pogo-white-card">
-        <h3 style="margin-bottom:8px;">💾 Save Backup (IndexedDB + JSON)</h3>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="pogo-pill-btn" onclick="window.PokeStorage.exportSaveFile()">⬇️ Export Save (.JSON)</button>
-          <button class="pogo-pill-btn secondary" onclick="document.getElementById('import-file-inp').click()">⬆️ Import Save</button>
-        </div>
-      </div>
-
-      <div class="pogo-white-card">
-        <h3 style="margin-bottom:8px;">🐞 Quick Bug Report (2 Clicks)</h3>
-        <input id="bug-desc" class="pogo-search-bar" style="margin-bottom:8px;" placeholder="Descreva rapidamente (opcional)..."/>
-        <button class="pogo-pill-btn" onclick="window.PokeGameUI.submitQuickBugReport()">🚀 Send Bug Report</button>
-      </div>
-
-      <div class="pogo-white-card">
-        <h3 style="margin-bottom:8px;">⚙️ Admin & 1-Click PWA</h3>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="pogo-pill-btn" onclick="window.open('admin.html', '_blank')">⚙️ Admin Balance Panel</button>
-          <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.installOneClickPwa()">📲 Install App</button>
-          <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.uninstallOneClickPwa()">🗑️ Reset Cache</button>
-        </div>
-      </div>`;
-    openModal("SETTINGS", html);
-  }
-
-  function submitQuickBugReport() {
-    const desc = document.getElementById("bug-desc") ? document.getElementById("bug-desc").value : "";
-    const report = {
-      timestamp: new Date().toISOString(),
-      category: "mobile_feedback",
-      description: desc || "Reporte rápido em 2 cliques",
-      userAgent: navigator.userAgent,
-      isSecureContext: window.isSecureContext,
-      fps: Math.round(1000 / Math.max(1, emaFrameMs))
-    };
-    const existing = JSON.parse(localStorage.getItem("pokeascii_bug_reports") || "[]");
-    existing.unshift(report);
-    localStorage.setItem("pokeascii_bug_reports", JSON.stringify(existing));
-    fetch("/api/bug-report", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(report)
-    }).catch(() => {});
-    S.showToast("✅ Bug report enviado com sucesso!", "info");
-    closeModal();
-  }
-
-  async function installOneClickPwa() {
-    if (deferredPwaPrompt) {
-      deferredPwaPrompt.prompt();
-      await deferredPwaPrompt.userChoice;
-      deferredPwaPrompt = null;
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "800 16px -apple-system, BlinkMacSystemFont, sans-serif";
+    if (progress < 0.80) {
+      ctx.fillText(`✨ O quê? ${evoScene.fromName} está evoluindo em ASCII 3D!`, cx, cardY + 28);
+      ctx.fillStyle = "#94eb9e";
+      ctx.font = "700 12px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText(`Morph 3D: ${Math.round((progress / 0.8) * 100)}%`, cx, cardY + 52);
     } else {
-      S.showToast("📲 No iPhone use 'Compartilhar -> Adicionar à Tela de Início'.", "info");
-    }
-  }
-
-  async function uninstallOneClickPwa() {
-    if (!confirm("Limpar cache e reiniciar em 1 clique?")) return;
-    if ("serviceWorker" in navigator) {
-      const regs = await navigator.serviceWorker.getRegistrations();
-      for (const r of regs) await r.unregister();
-    }
-    if ("caches" in window) {
-      const keys = await caches.keys();
-      for (const k of keys) await caches.delete(k);
-    }
-    localStorage.clear();
-    location.reload();
-  }
-
-  function triggerAnomalyScanner() {
-    closeRadialMenu();
-    const prof = S.getProfile();
-    if ((prof.anomalyCharge || 0) < 100) {
-      S.showToast(`📡 Scanner de Anomalia em ${prof.anomalyCharge || 0}% (Capture Pokémons ou gire PokéStops p/ chegar a 100%)!`, "info");
-      return;
-    }
-    prof.anomalyCharge = 0;
-    S.save();
-    spawnWildWave(true);
-    S.showToast(`🌌 ANOMALIA 3D DETECTADA! ${wildSpawns[0].species.name} surgiu ao seu lado no Mapa!`, "info");
-  }
-
-  function powerUpPokemon(uid) {
-    const prof = S.getProfile();
-    const pk = prof.pokemonBox.find(p => p.uid === uid);
-    if (!pk) return;
-    const candies = prof.candies[pk.speciesId] || 0;
-    if (prof.stardust < 250 || candies < 1) {
-      S.showToast("⚠️ Stardust (250) ou Candy (1) insuficiente!", "warn");
-      return;
-    }
-    prof.stardust -= 250;
-    prof.candies[pk.speciesId]--;
-    pk.level++;
-    pk.cp = D.calculateCP(pk.speciesId, pk.level, pk.ivAtk, pk.ivDef, pk.ivSta);
-    pk.maxHp = D.calculateMaxHP(pk.speciesId, pk.level, pk.ivSta);
-    pk.hp = pk.maxHp;
-    S.save();
-    A.playGotchaFanfare();
-    showPokemonDetailCardModal(uid);
-  }
-
-  // ============================================================================
-  // CUTSCENE 3D DE EVOLUÇÃO COM MORPH DE SILHUETA E HÉLICE DNA ASCII!
-  // ============================================================================
-  function evolvePokemon(uid) {
-    const prof = S.getProfile();
-    const pk = prof.pokemonBox.find(p => p.uid === uid);
-    if (!pk) return;
-    const oldSp = D.getSpecies(pk.speciesId);
-    if (!oldSp.evolvesTo) return;
-    const candies = prof.candies[pk.speciesId] || 0;
-    if (candies < oldSp.candyCost) {
-      S.showToast(`⚠️ Requer ${oldSp.candyCost} Candies!`, "warn");
-      return;
-    }
-
-    prof.candies[pk.speciesId] -= oldSp.candyCost;
-    const nextSp = D.getSpecies(oldSp.evolvesTo);
-    const oldSpeciesId = oldSp.id;
-    const oldName = oldSp.name;
-
-    pk.speciesId = nextSp.id;
-    pk.name = nextSp.name;
-    pk.fastMove = nextSp.fastMove;
-    pk.chargedMove = nextSp.chargedMove;
-    pk.cp = D.calculateCP(pk.speciesId, pk.level, pk.ivAtk, pk.ivDef, pk.ivSta);
-    pk.maxHp = D.calculateMaxHP(pk.speciesId, pk.level, pk.ivSta);
-    pk.hp = pk.maxHp;
-    prof.pokedexCaught[nextSp.id] = (prof.pokedexCaught[nextSp.id] || 0) + 1;
-    S.addXp(500);
-    S.save();
-    updateHudCounters();
-
-    // Inicia a Cutscene 3D de Evolução com Morph entre oldSpeciesId -> nextSp.id!
-    closeModal();
-    evoCutscene = {
-      uid: pk.uid,
-      oldId: oldSpeciesId,
-      newId: nextSp.id,
-      oldName,
-      newName: nextSp.name,
-      newCp: pk.cp,
-      isShiny: pk.isShiny,
-      timer: 0,
-      duration: 5.2,
-      cryPlayed: false
-    };
-    gameScene = "EVOLUTION_CUTSCENE";
-    document.getElementById("map-overworld-hud").style.display = "none";
-    document.getElementById("ar-encounter-hud").style.display = "none";
-    document.getElementById("live-battle-hud").style.display = "none";
-    A.playPokemonCry(oldSpeciesId);
-  }
-
-  function renderEvolutionMorphCutscene(W, H, timeSec) {
-    if (!evoCutscene) return;
-    const ev = evoCutscene;
-    const t = ev.timer;
-
-    // Fundo Cósmico Turquesa/Azul Profundo da Evolução do Pokémon GO
-    const bg = ctx.createRadialGradient(W*0.5, H*0.48, 20, W*0.5, H*0.48, Math.max(W, H)*0.75);
-    bg.addColorStop(0, "#0ea5e9");
-    bg.addColorStop(0.5, "#0369a1");
-    bg.addColorStop(1, "#082f49");
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, W, H);
-
-    const cx = W * 0.5, cy = H * 0.48;
-    const baseSize = Math.min(W * 0.58, H * 0.38);
-
-    // Pedestal Holográfico 3D e Dupla-Hélice DNA de Caracteres ASCII Subindo!
-    ctx.save();
-    ctx.strokeStyle = "rgba(186, 230, 253, 0.75)";
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.ellipse(cx, cy + baseSize*0.48, baseSize*0.52, baseSize*0.16, 0, 0, Math.PI*2); ctx.stroke();
-
-    ctx.font = "bold 16px 'Cascadia Mono', Consolas, monospace";
-    const dnaChars = "✦*+@#ATGC";
-    for (let i = 0; i < 24; ++i) {
-      const py = cy + baseSize*0.45 - ((t * 140 + i * 18) % (baseSize * 1.25));
-      const phase = t * 6 + i * 0.55;
-      const px1 = cx + Math.sin(phase) * (baseSize * 0.42);
-      const px2 = cx - Math.sin(phase) * (baseSize * 0.42);
-      ctx.fillStyle = "#7dd3fc";
-      ctx.fillText(dnaChars[i % dnaChars.length], px1, py);
       ctx.fillStyle = "#fde047";
-      ctx.fillText(dnaChars[(i+3) % dnaChars.length], px2, py);
+      ctx.fillText(`🎉 PARABÉNS! Seu ${evoScene.fromName} evoluiu para ${evoScene.toName}!`, cx, cardY + 28);
+      ctx.fillStyle = "#94eb9e";
+      ctx.font = "800 13px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText(`Novo Poder de Combate: CP ${evoScene.newCp}`, cx, cardY + 52);
     }
     ctx.restore();
 
-    const oldSculp = E.getPokemonAscii3DSculpture(ev.oldId, ev.isShiny, false);
-    const newSculp = E.getPokemonAscii3DSculpture(ev.newId, ev.isShiny, false);
-
-    if (t < 1.1) {
-      // Fase 1 (0.0s .. 1.1s): Pokémon original começa a brilhar com energia evolutiva
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.drawImage(oldSculp, -baseSize*0.5, -baseSize*0.5, baseSize, baseSize);
-      const glowAlpha = Math.min(0.85, t / 1.1);
-      ctx.globalCompositeOperation = "source-atop";
-      ctx.fillStyle = `rgba(224, 242, 254, ${glowAlpha})`;
-      ctx.fillRect(-baseSize*0.5, -baseSize*0.5, baseSize, baseSize);
-      ctx.restore();
-    } else if (t < 3.8) {
-      // Fase 2 (1.1s .. 3.8s): MORPH ACELERADO DE SILHUETA!
-      // A silhueta luminosa interpola e oscila cada vez mais rápido entre a forma antiga e a forma evoluída!
-      const mt = (t - 1.1) / 2.7; // 0.0 -> 1.0
-      const osc = 0.5 + 0.5 * Math.sin(mt * mt * 48.0);
-      const blendNew = Math.min(1.0, Math.max(0.0, mt * 0.65 + osc * 0.55));
-      const blendOld = 1.0 - blendNew;
-
-      // Raios solares saindo do núcleo do Morph
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
-      ctx.lineWidth = 4;
-      for (let r = 0; r < 12; ++r) {
-        const a = (r / 12) * Math.PI * 2 + t * 2.5;
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(Math.cos(a) * baseSize * 0.9, Math.sin(a) * baseSize * 0.9);
-        ctx.stroke();
-      }
-
-      // Desenha Forma Antiga em Silhueta Branca/Ciano com escala comprimindo/esticando
-      if (blendOld > 0.04) {
-        ctx.save();
-        ctx.globalAlpha = blendOld;
-        const sOld = baseSize * (0.85 + 0.20 * blendOld);
-        ctx.drawImage(oldSculp, -sOld*0.5, -sOld*0.5, sOld, sOld);
-        ctx.globalCompositeOperation = "source-atop";
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(-sOld*0.5, -sOld*0.5, sOld, sOld);
-        ctx.restore();
-      }
-
-      // Desenha Forma Nova Evoluída em Silhueta Branca/Ciano emergindo do Morph!
-      if (blendNew > 0.04) {
-        ctx.save();
-        ctx.globalAlpha = blendNew;
-        const sNew = baseSize * (0.88 + 0.26 * blendNew);
-        ctx.drawImage(newSculp, -sNew*0.5, -sNew*0.5, sNew, sNew);
-        ctx.globalCompositeOperation = "source-atop";
-        ctx.fillStyle = "#e0f2fe";
-        ctx.fillRect(-sNew*0.5, -sNew*0.5, sNew, sNew);
-        ctx.restore();
-      }
-      ctx.restore();
-    } else {
-      // Fase 3 (3.8s .. 5.2s): Clarão Supernova + Revelação em Cores 3D do Novo Pokémon Evoluído!
-      if (!ev.cryPlayed) {
-        ev.cryPlayed = true;
-        A.playGotchaFanfare();
-        A.playPokemonCry(ev.newId);
-      }
-      const rt = (t - 3.8) / 1.4;
-      const sFinal = baseSize * 1.15;
-      const bounce = Math.abs(Math.sin(rt * Math.PI * 2)) * 22 * (1 - rt * 0.5);
-
-      ctx.save();
-      ctx.translate(cx, cy - bounce);
-      ctx.drawImage(newSculp, -sFinal*0.5, -sFinal*0.5, sFinal, sFinal);
-      ctx.restore();
-
-      // Anel de choque da Supernova
-      if (rt < 0.7) {
-        ctx.save();
-        ctx.strokeStyle = `rgba(255, 255, 255, ${1 - rt / 0.7})`;
-        ctx.lineWidth = 12 * (1 - rt / 0.7);
-        ctx.beginPath(); ctx.arc(cx, cy, rt * W * 0.8, 0, Math.PI * 2); ctx.stroke();
-        ctx.restore();
-      }
+    if (progress >= 1.0) {
+      evoScene.active = false;
+      window.PokeAudio.playGotchaFanfare();
+      window.PokeAudio.playPokemonCry(evoScene.toSpeciesId);
+      toggleSceneMode("CITY_MAP");
+      showPokemonDetailSheet(evoScene.monUid);
     }
-
-    // Banner inferior da Cutscene de Evolução
-    ctx.save();
-    ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
-    ctx.beginPath(); ctx.roundRect(W*0.5 - 175, H - 96, 350, 58, 18); ctx.fill();
-    ctx.fillStyle = "#254a52";
-    ctx.font = "800 15px -apple-system, sans-serif";
-    ctx.textAlign = "center";
-    if (t < 3.8) {
-      ctx.fillText(`O quê? ${ev.oldName} está evoluindo!`, W*0.5, H - 62);
-    } else {
-      ctx.fillStyle = "#1c8c82";
-      ctx.fillText(`✨ Parabéns! Seu ${ev.oldName} evoluiu`, W*0.5, H - 72);
-      ctx.fillStyle = "#254a52";
-      ctx.fillText(`para ${ev.newName.toUpperCase()} (CP ${ev.newCp})!`, W*0.5, H - 50);
-    }
-    ctx.restore();
   }
 
-  function setBuddyPokemon(uid) {
-    const prof = S.getProfile();
-    prof.buddyUid = uid;
-    S.save();
-    showPokemonDetailCardModal(uid);
-    updateHudCounters();
-  }
+  // ============================================================================
+  // INTERAÇÃO TOUCH & MOUSE: JOYSTICK, PINCH-TO-ZOOM, ROTAÇÃO 3D E CURVEBALL
+  // ============================================================================
+  function bindJoystickEvents() {
+    const zone = document.getElementById("joystick-zone");
+    const knob = document.getElementById("joystick-knob");
+    if (!zone || !knob) return;
 
-  async function syncCurrentPageWiki(startId, endId, page) {
-    S.showToast(`🌐 Sincronizando #${startId}..#${endId} com a PokéAPI...`, "info");
-    const promises = [];
-    for (let id = startId; id <= endId; ++id) promises.push(D.syncSpeciesFromPokeAPI(id));
-    await Promise.all(promises);
-    B.save(Object.assign({}, B.get(), { activeDexLimit: Math.max(B.get().activeDexLimit, endId) }));
-    showPokedexModal(page);
-  }
-
-  function updateHudCounters() {
-    const prof = S.getProfile();
-    const elLvl = document.getElementById("hud-level-num");
-    if (elLvl) elLvl.textContent = prof.level;
-    const elName = document.getElementById("hud-trainer-name");
-    if (elName) elName.textContent = prof.trainerName;
-
-    const buddy = prof.pokemonBox.find(p => p.uid === prof.buddyUid) || prof.pokemonBox[0];
-    const elBuddy = document.getElementById("hud-buddy-icon");
-    if (elBuddy && buddy) {
-      elBuddy.innerHTML = `<img src="${E.getPokemonCardImageSrc(buddy.speciesId, buddy.isShiny, false)}" alt="Buddy"/>`;
-    }
-    updateNearbyPillIcons();
-  }
-
-  function updateNearbyPillIcons() {
-    const prof = S.getProfile();
-    const pill = document.getElementById("nearby-pill");
-    if (!pill) return;
-    let html = "";
-    for (let i = 0; i < Math.min(3, wildSpawns.length); ++i) {
-      const w = wildSpawns[i];
-      const isUncaught = !prof.pokedexCaught[w.data.speciesId];
-      html += `<img src="${E.getPokemonCardImageSrc(w.data.speciesId, false, isUncaught)}" alt="nearby"/>`;
-    }
-    pill.innerHTML = html;
-  }
-
-  function toggleSceneMode(forcedMode = null) {
-    A.playUiClick();
-    gameScene = forcedMode || (gameScene === "CITY_MAP" ? "AR_CAPTURE" : "CITY_MAP");
-    document.getElementById("map-overworld-hud").style.display = gameScene === "CITY_MAP" ? "block" : "none";
-    document.getElementById("ar-encounter-hud").style.display = gameScene === "AR_CAPTURE" ? "block" : "none";
-    updateHudCounters();
-  }
-
-  async function toggleRealCamera() {
-    A.playUiClick();
-    if (useRealCamera) {
-      useRealCamera = false;
-      if (video && video.srcObject) {
-        video.srcObject.getTracks().forEach(t => t.stop());
-        video.srcObject = null;
+    const maxRadius = 25;
+    const handleMove = (clientX, clientY) => {
+      const rect = zone.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      let dx = clientX - cx;
+      let dy = clientY - cy;
+      const dist = Math.hypot(dx, dy);
+      if (dist > maxRadius) {
+        dx = (dx / dist) * maxRadius;
+        dy = (dy / dist) * maxRadius;
       }
-      return;
-    }
-    const ok = await E.startCameraOnVideoElement(video, (msg, code, httpsUrl) => {
-      S.showToast(msg, code === "ok" ? "info" : "warn");
-      if (code === "https_required" && httpsUrl) {
-        if (confirm("No iPhone, a Apple exige HTTPS para abrir a câmera. Abrir porta HTTPS (8443)?")) {
-          location.href = httpsUrl;
-        }
-      }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      cityState.joyDx = dx / maxRadius;
+      cityState.joyDz = dy / maxRadius;
+    };
+
+    const resetJoy = () => {
+      cityState.joyActive = false;
+      cityState.joyDx = 0;
+      cityState.joyDz = 0;
+      knob.style.transform = "translate(0px, 0px)";
+    };
+
+    zone.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      cityState.joyActive = true;
+      zone.setPointerCapture(e.pointerId);
+      handleMove(e.clientX, e.clientY);
     });
-    useRealCamera = ok;
+    zone.addEventListener("pointermove", (e) => {
+      if (!cityState.joyActive) return;
+      e.stopPropagation();
+      handleMove(e.clientX, e.clientY);
+    });
+    zone.addEventListener("pointerup", resetJoy);
+    zone.addEventListener("pointercancel", resetJoy);
   }
 
-  // ============================================================================
-  // INTERAÇÕES TOUCH (PINCH-TO-ZOOM COM 2 DEDOS + ROTAÇÃO + CURVEBALL + JOYSTICK)
-  // ============================================================================
-  function setupInteractions() {
-    let dragStart = null;
-    let prevAngle = null;
-    let pinchStartDist = null;
-    let pinchStartOrbit = null;
+  function bindInputEvents() {
+    bindJoystickEvents();
 
-    // Suporte a Pinça (Pinch-to-Zoom com 2 dedos no Mobile!)
+    // Pinch-to-Zoom de 2 dedos no Mobile
     canvas.addEventListener("touchstart", (e) => {
-      if (e.touches.length === 2) {
-        pinchStartDist = Math.hypot(
+      if (e.touches.length === 2 && gameScene === "CITY_MAP") {
+        activePinchDist = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY
         );
-        pinchStartOrbit = cityState.camOrbitDist;
       }
     }, { passive: true });
 
     canvas.addEventListener("touchmove", (e) => {
-      if (e.touches.length === 2 && pinchStartDist !== null) {
-        const currDist = Math.hypot(
+      if (e.touches.length === 2 && activePinchDist !== null && gameScene === "CITY_MAP") {
+        const newDist = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY
         );
-        const scale = pinchStartDist / Math.max(20, currDist);
-        cityState.camOrbitDist = Math.max(3.5, Math.min(20.0, pinchStartOrbit * scale));
+        const delta = (activePinchDist - newDist) * 0.06;
+        adjustZoom(delta);
+        activePinchDist = newDist;
       }
     }, { passive: true });
 
-    canvas.addEventListener("touchend", () => {
-      pinchStartDist = null;
-    }, { passive: true });
+    canvas.addEventListener("touchend", () => { activePinchDist = null; }, { passive: true });
 
-    // Zoom com Roda do Mouse no PC
+    // Scroll do mouse para Zoom (2.5m até 55m!)
     canvas.addEventListener("wheel", (e) => {
-      cityState.camOrbitDist = Math.max(3.5, Math.min(20.0, cityState.camOrbitDist + (e.deltaY > 0 ? 1.0 : -1.0)));
+      if (gameScene === "CITY_MAP") {
+        adjustZoom(e.deltaY * 0.012);
+      }
     }, { passive: true });
 
     canvas.addEventListener("pointerdown", (e) => {
-      A.init();
-      const bx = canvas.width * 0.5, by = canvas.height - 88;
-      const distToBall = Math.hypot(e.clientX - bx, e.clientY - by);
+      window.PokeAudio.init();
+      const x = e.clientX, y = e.clientY;
 
-      dragStart = {
-        x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY,
-        t: performance.now(),
-        onBall: distToBall < 95 && gameScene === "AR_CAPTURE"
-      };
-      prevAngle = Math.atan2(e.clientY - by, e.clientX - bx);
-    });
-
-    canvas.addEventListener("pointermove", (e) => {
-      if (!dragStart || e.buttons === 0 || pinchStartDist !== null) return;
-      const bx = canvas.width * 0.5, by = canvas.height - 88;
-
-      if (dragStart.onBall && gameScene === "AR_CAPTURE") {
-        const ang = Math.atan2(e.clientY - by, e.clientX - bx);
-        if (prevAngle !== null) {
-          let dAng = ang - prevAngle;
-          if (dAng > Math.PI) dAng -= Math.PI * 2;
-          if (dAng < -Math.PI) dAng += Math.PI * 2;
-          if (Math.abs(dAng) > 0.04 && Math.abs(dAng) < 1.2) {
-            ball.curveDir = dAng >= 0 ? 1 : -1;
-            ball.curveRpm = Math.min(1.0, ball.curveRpm + Math.abs(dAng) * 0.32);
-            ball.spinAngle += dAng * 2.5;
-            if (Math.random() < 0.35) A.playCurveballSpin(ball.curveRpm);
-          }
-        }
-        prevAngle = ang;
-      } else {
-        const dx = e.clientX - dragStart.x;
-        if (gameScene === "CITY_MAP") {
-          cityState.camOrbitYaw -= dx * 0.0065;
-        } else if (!hasImu) {
-          pose.yaw -= dx * 0.005;
-        }
-        dragStart.x = e.clientX;
+      if (gameScene === "LIVE_BATTLE" && liveBattle.active) {
+        dragStartX = x;
+        dragStartY = y;
+        isDraggingLook = true;
+        return;
       }
-    });
 
-    canvas.addEventListener("pointerup", (e) => {
-      if (!dragStart) return;
-      const totalMove = Math.hypot(e.clientX - dragStart.startX, e.clientY - dragStart.startY);
-      const dx = e.clientX - dragStart.startX, dy = e.clientY - dragStart.startY;
-      const dtMs = Math.max(16, performance.now() - dragStart.t);
-
-      if (gameScene === "CITY_MAP" && totalMove < 24) {
-        for (const t of clickableMapTargets) {
-          if (Math.hypot(e.clientX - t.x, e.clientY - t.y) <= t.r) {
-            if (t.type === "wild") {
-              enterArEncounterWithWild(t.index);
-            } else if (t.type === "poi") {
-              const poi = cityState.pois[t.index];
-              if (poi.type === "pokestop") {
-                const prof = S.getProfile();
-                prof.bag.poke_ball = (prof.bag.poke_ball || 0) + 5;
-                prof.bag.great_ball = (prof.bag.great_ball || 0) + 2;
-                prof.bag.razz_berry = (prof.bag.razz_berry || 0) + 2;
-                prof.anomalyCharge = Math.min(100, (prof.anomalyCharge || 0) + 15);
-                S.addXp(100);
-                S.save();
-                A.playGotchaFanfare();
-                S.showToast(`🟦 ${poi.name}: +5 Poké Balls, +2 Great Balls, +2 Razz Berries!`, "info");
-              } else if (poi.type === "gym") {
-                startBattle("GYM", poi.guardId || 26, poi.cp || 1950);
-              } else if (poi.type === "raid") {
-                startBattle("RAID", poi.bossId || 150, poi.cp || 45800);
-              } else if (poi.type === "villain") {
-                startBattle("VILLAIN", poi.bossId || 94, poi.cp || 2400);
-              }
-            }
-            dragStart = null;
+      if (gameScene === "CITY_MAP") {
+        for (const t of projectedClickTargets) {
+          if (Math.hypot(x - t.x, y - (t.y - 12)) <= t.r) {
+            handleCityEntityClick(t);
             return;
           }
         }
+        isDraggingLook = true;
+        dragStartX = x;
+        dragStartY = y;
+        return;
       }
 
-      if (gameScene === "LIVE_BATTLE") {
-        if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy)) {
+      // Modo Captura AR: verifica se clicou na Pokébola 3D na parte inferior
+      const ballScreenX = canvas.width * 0.5 + ball.pos.x * 130;
+      const ballScreenY = canvas.height * 0.76;
+
+      if (ball.state === 0 && Math.hypot(x - ballScreenX, y - ballScreenY) < 120) {
+        ball.isDraggingBall = true;
+        ball.lastPointerX = x;
+        ball.lastPointerY = y;
+        ball.lastPointerTime = performance.now();
+        ball.spinHistory = [];
+      } else {
+        isDraggingLook = true;
+        dragStartX = x;
+        dragStartY = y;
+      }
+    });
+
+    window.addEventListener("pointermove", (e) => {
+      const x = e.clientX, y = e.clientY;
+      if (ball.isDraggingBall && ball.state === 0 && gameScene === "AR_CAPTURE") {
+        const now = performance.now();
+        const dx = x - ball.lastPointerX;
+        const dy = y - ball.lastPointerY;
+
+        ball.pos.x = Math.max(-0.9, Math.min(0.9, (x - canvas.width * 0.5) / (canvas.width * 0.42)));
+        ball.pos.y = Math.max(-0.9, Math.min(0.25, -0.55 - (canvas.height * 0.76 - y) / (canvas.height * 0.45)));
+
+        const cx = canvas.width * 0.5, cy = canvas.height * 0.72;
+        const cross = (ball.lastPointerX - cx) * (y - cy) - (ball.lastPointerY - cy) * (x - cx);
+        if (Math.abs(cross) > 45) {
+          ball.spinRpm = Math.min(2.6, ball.spinRpm + Math.abs(cross) * 0.00028);
+          ball.curveDir = cross > 0 ? -1 : 1;
+          if (Math.random() < 0.25) window.PokeAudio.playCurveballSpin(ball.spinRpm);
+        }
+
+        ball.spinHistory.push({ dx, dy, dt: Math.max(4, now - ball.lastPointerTime) });
+        if (ball.spinHistory.length > 6) ball.spinHistory.shift();
+
+        ball.lastPointerX = x;
+        ball.lastPointerY = y;
+        ball.lastPointerTime = now;
+      } else if (isDraggingLook) {
+        const dx = x - dragStartX;
+        const dy = y - dragStartY;
+        if (gameScene === "CITY_MAP") {
+          cityState.camOrbitYaw -= dx * 0.0065;
+          cityState.camOrbitPitch = Math.max(0.22, Math.min(1.28, cityState.camOrbitPitch + dy * 0.0045));
+        } else if (gameScene === "AR_CAPTURE") {
+          camYaw -= dx * 0.005;
+          camPitch = Math.max(-0.65, Math.min(0.65, camPitch - dy * 0.004));
+        }
+        dragStartX = x;
+        dragStartY = y;
+      }
+    });
+
+    window.addEventListener("pointerup", (e) => {
+      if (gameScene === "LIVE_BATTLE" && liveBattle.active && isDraggingLook) {
+        isDraggingLook = false;
+        const dx = e.clientX - dragStartX;
+        if (Math.abs(dx) > 42) {
           triggerBattleDodge(dx > 0 ? 1 : -1);
         } else {
           triggerPlayerAttack(false);
         }
-        dragStart = null;
-        prevAngle = null;
         return;
       }
 
-      if (gameScene === "AR_CAPTURE" && dy < -35 && dtMs < 750) {
-        const speed = Math.min(10.5, Math.max(6.0, (-dy / dtMs) * 7.4));
-        const yawOff = (dx / window.innerWidth) * 0.85;
-        throwPokeball(speed, yawOff);
-      }
-      dragStart = null;
-      prevAngle = null;
-    });
+      if (ball.isDraggingBall && ball.state === 0 && gameScene === "AR_CAPTURE") {
+        ball.isDraggingBall = false;
+        let avgVx = 0, avgVy = 0;
+        for (const h of ball.spinHistory) {
+          avgVx += h.dx / h.dt;
+          avgVy += h.dy / h.dt;
+        }
+        if (ball.spinHistory.length > 0) {
+          avgVx /= ball.spinHistory.length;
+          avgVy /= ball.spinHistory.length;
+        }
 
-    const joyZone = document.getElementById("joystick-zone");
-    const joyKnob = document.getElementById("joystick-knob");
-    if (joyZone && joyKnob) {
-      let joyCenter = null;
-      joyZone.addEventListener("pointerdown", (e) => {
-        e.stopPropagation();
-        const rect = joyZone.getBoundingClientRect();
-        joyCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-        cityState.joyActive = true;
-        joyZone.setPointerCapture(e.pointerId);
-      });
-      joyZone.addEventListener("pointermove", (e) => {
-        if (!cityState.joyActive || !joyCenter) return;
-        const maxR = 26;
-        let dx = e.clientX - joyCenter.x, dy = e.clientY - joyCenter.y;
-        const dist = Math.hypot(dx, dy);
-        if (dist > maxR) { dx = (dx / dist) * maxR; dy = (dy / dist) * maxR; }
-        joyKnob.style.transform = `translate(${dx}px, ${dy}px)`;
-        cityState.joyDx = dx / maxR;
-        cityState.joyDy = dy / maxR;
-      });
-      const resetJoy = () => {
-        cityState.joyActive = false;
-        cityState.joyDx = 0;
-        cityState.joyDy = 0;
-        joyKnob.style.transform = `translate(0px, 0px)`;
-      };
-      joyZone.addEventListener("pointerup", resetJoy);
-      joyZone.addEventListener("pointercancel", resetJoy);
+        if (avgVy < -0.16) {
+          const p = window.PokeStorage.getProfile();
+          if ((p.bag[activeBallType] || 0) <= 0) {
+            window.PokeStorage.showToast("⚠️ Suas Pokébolas desse tipo acabaram! Gire um PokéStop no Mapa!", "warn");
+            resetBall();
+            return;
+          }
+          p.bag[activeBallType]--;
+          updateHud();
+
+          ball.state = 1;
+          const speed = Math.min(2.2, Math.max(0.95, Math.abs(avgVy) * 1.15));
+          ball.vel.x = avgVx * 2.2 - ball.curveDir * ball.spinRpm * 0.85;
+          ball.vel.y = 3.25 * speed;
+          ball.vel.z = -4.25 * speed;
+          window.PokeAudio.playThrow();
+        } else {
+          resetBall();
+        }
+      }
+      isDraggingLook = false;
+    });
+  }
+
+  function handleCityEntityClick(target) {
+    window.PokeAudio.playUiClick();
+    if (target.type === "WILD") {
+      startWildEncounterFromMap(target.index);
+    } else if (target.type === "POKESTOP") {
+      spinPokestopOnMap(target.index);
+    } else if (target.type === "GYM") {
+      showGymDetailModal(target.index);
+    } else if (target.type === "VILLAIN") {
+      startLiveBattle("VILLAIN", 150, 1750, "🚀 Líder Cyber Rocket", 40, 1000, false);
+    }
+  }
+
+  function spinPokestopOnMap(index) {
+    const ps = cityState.pokestops[index];
+    if (!ps) return;
+    const dist = Math.hypot(ps.x - cityState.playerX, ps.z - cityState.playerZ);
+    if (dist > 7.5) {
+      window.PokeStorage.showToast(`🚶 Aproxime-se do ${ps.name} com o Joystick (${dist.toFixed(1)}m)!`, "warn");
+      return;
+    }
+    if (Date.now() < ps.cooldownUntil) {
+      window.PokeStorage.showToast(`⏳ ${ps.name} recarregando (${Math.ceil((ps.cooldownUntil - Date.now()) / 1000)}s).`, "info");
+      return;
+    }
+    ps.cooldownUntil = Date.now() + 25000;
+    const p = window.PokeStorage.getProfile();
+    const balls = 3 + Math.floor(Math.random() * 3);
+    p.bag.poke_ball = (p.bag.poke_ball || 0) + balls;
+    p.bag.razz_berry = (p.bag.razz_berry || 0) + 2;
+    p.stardust += 150;
+    if (p.tasksProgress) p.tasksProgress.spins = (p.tasksProgress.spins || 0) + 1;
+    p.researchStamps = Math.min(7, (p.researchStamps || 0) + 1);
+
+    // Se tiver menos de 9 ovos na caixa, chance de ganhar um Ovo 2km/5km/10km!
+    let eggMsg = "";
+    if (Array.isArray(p.eggs) && p.eggs.length < 9 && Math.random() < 0.45) {
+      const kms = [2.0, 5.0, 10.0][Math.floor(Math.random() * 3)];
+      p.eggs.push({ id: "egg_" + Date.now(), kmRequired: kms, kmWalked: 0, incubating: !p.eggs.some(e => e.incubating) });
+      eggMsg = ` + 🥚 Ovo de ${kms}km`;
     }
 
-    window.addEventListener("beforeinstallprompt", (e) => {
-      e.preventDefault();
-      deferredPwaPrompt = e;
+    window.PokeStorage.addXp(150);
+    window.PokeAudio.playGotchaFanfare();
+    window.PokeStorage.showToast(`🔵 ${ps.name}: +${balls} Pokébolas, +2 Berries, +150 Stardust${eggMsg}!`, "success");
+    updateHud();
+  }
+
+  // ============================================================================
+  // ATUALIZAÇÃO DO HUD MOBILE MINIMALISTA (Ref: 22.18.13 (2).jpeg)
+  // ============================================================================
+  function updateHud() {
+    const p = window.PokeStorage.getProfile();
+    if (!p) return;
+
+    const lvlEl = document.getElementById("hud-level-num");
+    const nameEl = document.getElementById("hud-trainer-name");
+    const buddyEl = document.getElementById("hud-buddy-icon");
+    const nearbyEl = document.getElementById("nearby-pill");
+    const anomalyLbl = document.getElementById("radial-anomaly-lbl");
+
+    if (lvlEl) lvlEl.textContent = p.level;
+    if (nameEl) nameEl.textContent = p.trainerName;
+
+    const buddy = p.pokemonBox.find(m => m.uid === p.buddyUid) || p.pokemonBox[0];
+    if (buddyEl && buddy) {
+      buddyEl.innerHTML = `<img src="${E.getPokemonCardImageSrc(buddy.speciesId, false, buddy.isShiny)}" alt="${buddy.name}"/>`;
+    }
+
+    // Pílula Branca Nearby com 3 Silhuetas 3D em ASCII dos Pokémons ao redor
+    if (nearbyEl) {
+      const top3 = cityState.wildSpawns.slice(0, 3);
+      nearbyEl.innerHTML = top3.map(sp => {
+        const caught = !!p.pokedexCaught[sp.mon.speciesId];
+        return `<img src="${E.getPokemonCardImageSrc(sp.mon.speciesId, !caught, false)}" alt="Nearby"/>`;
+      }).join("");
+    }
+
+    if (anomalyLbl) {
+      anomalyLbl.textContent = `ANOMALY (${p.anomalyCharge || 0}%)`;
+    }
+  }
+
+  function openRadialMenu() {
+    window.PokeAudio.playUiClick();
+    updateHud();
+    const el = document.getElementById("pogo-radial-menu");
+    if (el) el.style.display = "flex";
+  }
+
+  function closeRadialMenu() {
+    window.PokeAudio.playUiClick();
+    const el = document.getElementById("pogo-radial-menu");
+    if (el) el.style.display = "none";
+  }
+
+  function openModal(title, html) {
+    closeRadialMenu();
+    document.getElementById("modal-title").textContent = title;
+    document.getElementById("modal-body").innerHTML = html;
+    document.getElementById("game-modal").classList.add("open");
+  }
+
+  function closeModal() {
+    window.PokeAudio.playUiClick();
+    document.getElementById("game-modal").classList.remove("open");
+  }
+
+  // ============================================================================
+  // 1. POKÉMON BOX COM 3 ABAS (TAGS | POKÉMON | EGGS) + FICHA + APPRAISAL IV 3 BARRAS
+  // ============================================================================
+  function showPokemonBoxModal(activeTab = "POKEMON", searchQuery = "") {
+    const p = window.PokeStorage.getProfile();
+    const q = searchQuery.trim().toLowerCase();
+    const eggs = p.eggs || [];
+
+    const tabsHtml = `
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);border-bottom:2px solid #cbe8de;margin-bottom:12px;text-align:center;font-size:12px;font-weight:800;">
+        <div onclick="window.PokeGameUI.showPokemonBoxModal('TAGS')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'TAGS' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'TAGS' ? '3px solid #1c7c74' : 'none'};">
+          TAGS
+        </div>
+        <div onclick="window.PokeGameUI.showPokemonBoxModal('POKEMON')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'POKEMON' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'POKEMON' ? '3px solid #1c7c74' : 'none'};">
+          POKÉMON (${p.pokemonBox.length}/500)
+        </div>
+        <div onclick="window.PokeGameUI.showPokemonBoxModal('EGGS')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'EGGS' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'EGGS' ? '3px solid #1c7c74' : 'none'};">
+          EGGS (${eggs.length}/12)
+        </div>
+      </div>
+    `;
+
+    if (activeTab === "EGGS") {
+      const eggGrid = eggs.map((egg, idx) => {
+        const col = egg.kmRequired >= 10 ? "#9333ea" : (egg.kmRequired >= 5 ? "#f59e0b" : "#10b981");
+        const pct = Math.min(100, Math.round(((egg.kmWalked || 0) / egg.kmRequired) * 100));
+        return `
+          <div class="pogo-mon-cell" onclick="window.PokeGameUI.incubateEgg(${idx})" style="border:2px solid ${egg.incubating ? col : '#d5ece4'};">
+            <div style="font-size:11px;font-weight:800;color:${col};">${egg.incubating ? "🔥 INCUBANDO" : "TOQUE P/ INCUBAR"}</div>
+            <div style="font-size:44px;margin:8px 0;">🥚</div>
+            <div class="pogo-mon-name">${(egg.kmWalked || 0).toFixed(1)} / ${egg.kmRequired.toFixed(1)} km</div>
+            <div style="width:80%;height:6px;background:#e2f2ec;border-radius:3px;margin:6px auto 0;overflow:hidden;">
+              <div style="width:${pct}%;height:100%;background:${col};"></div>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      openModal(`OVOS (${eggs.length}/12)`, `
+        ${tabsHtml}
+        <div class="pogo-white-card" style="font-size:12px;color:#527a80;text-align:center;">
+          🚶 Caminhe pelo Mapa GPS ou use o Joystick para chocar seus Ovos na Incubadora Infinita! Gire PokéStops para encontrar novos ovos de 2km, 5km e 10km.
+        </div>
+        <div class="pogo-3col-grid">${eggGrid || "<p style='grid-column:1/-1;'>Gire um PokéStop no mapa para receber Ovos!</p>"}</div>
+      `);
+      return;
+    }
+
+    if (activeTab === "TAGS") {
+      const shinyCount = p.pokemonBox.filter(m => m.isShiny).length;
+      const star3Count = p.pokemonBox.filter(m => m.ivPercent >= 80).length;
+      const highCpCount = p.pokemonBox.filter(m => m.cp >= 1000).length;
+      openModal("TAGS DE POKÉMON", `
+        ${tabsHtml}
+        <div class="pogo-white-card" onclick="window.PokeGameUI.showPokemonBoxModal('POKEMON', 'shiny')" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+          <div><b style="color:#d97706;">✨ Pokémons Shiny</b><div style="font-size:11px;color:#688a8e;">Variantes cromáticas raras</div></div>
+          <span class="pogo-pill-btn">${shinyCount}</span>
+        </div>
+        <div class="pogo-white-card" onclick="window.PokeGameUI.showPokemonBoxModal('POKEMON', '3*')" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+          <div><b style="color:#1c7c74;">🌟 Top IV (3★ e 4★ / 80%+)</b><div style="font-size:11px;color:#688a8e;">Ideais para Raids e Ginásios</div></div>
+          <span class="pogo-pill-btn">${star3Count}</span>
+        </div>
+        <div class="pogo-white-card" onclick="window.PokeGameUI.showPokemonBoxModal('POKEMON', 'cp1000')" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+          <div><b style="color:#2563eb;">⚔️ Elite de Combate (CP 1000+)</b><div style="font-size:11px;color:#688a8e;">Campeões prontos para batalha</div></div>
+          <span class="pogo-pill-btn">${highCpCount}</span>
+        </div>
+      `);
+      return;
+    }
+
+    const sorted = [...p.pokemonBox]
+      .filter(m => {
+        if (!q) return true;
+        if (q === "shiny") return m.isShiny;
+        if (q === "3*") return m.ivPercent >= 80;
+        if (q === "cp1000") return m.cp >= 1000;
+        return m.name.toLowerCase().includes(q) || String(m.speciesId) === q;
+      })
+      .sort((a, b) => b.cp - a.cp);
+
+    const gridHtml = sorted.map(m => `
+      <div class="pogo-mon-cell ${m.isShiny ? 'shiny' : ''}" onclick="window.PokeGameUI.showPokemonDetailSheet('${m.uid}')">
+        <div class="pogo-cp-top">CP <b>${m.cp}</b></div>
+        <img class="pogo-mon-img" src="${E.getPokemonCardImageSrc(m.speciesId, false, m.isShiny)}" alt="${m.name}"/>
+        <div class="pogo-mon-name">${m.isShiny ? "✨" : ""}${m.name}</div>
+        <div class="pogo-hp-line"></div>
+      </div>
+    `).join("");
+
+    openModal(`POKÉMON (${p.pokemonBox.length}/500)`, `
+      ${tabsHtml}
+      <input class="pogo-search-bar" type="text" placeholder="🔍 Buscar Pokémon, 'shiny', '3*'..."
+        value="${searchQuery}" oninput="window.PokeGameUI.showPokemonBoxModal('POKEMON', this.value)"/>
+      <div class="pogo-3col-grid">
+        ${gridHtml || "<p style='grid-column:1/-1;color:#668a8e;'>Nenhum Pokémon encontrado.</p>"}
+      </div>
+    `);
+  }
+
+  function incubateEgg(eggIdx) {
+    const p = window.PokeStorage.getProfile();
+    if (!p.eggs || !p.eggs[eggIdx]) return;
+    p.eggs.forEach((e, idx) => { e.incubating = (idx === eggIdx); });
+    window.PokeStorage.save();
+    window.PokeAudio.playUiClick();
+    window.PokeStorage.showToast(`🥚 Ovo de ${p.eggs[eggIdx].kmRequired}km colocado na Incubadora Infinita!`, "success");
+    showPokemonBoxModal("EGGS");
+  }
+
+  function showPokemonDetailSheet(uid, showAppraisal = false) {
+    const p = window.PokeStorage.getProfile();
+    const m = p.pokemonBox.find(x => x.uid === uid);
+    if (!m) return;
+    const sp = window.PokeData.getSpecies(m.speciesId);
+    const candies = p.candies[m.speciesId] || 0;
+    const weight = (sp.weight_kg * (m.scaleVariation || 1)).toFixed(2);
+    const height = (sp.height_m * (m.scaleVariation || 1)).toFixed(2);
+
+    const stars = m.ivPercent === 100 ? "⭐⭐⭐⭐ (4★ PERFEITO!)" :
+                  (m.ivPercent >= 82 ? "⭐⭐⭐ (3★ Excelente)" :
+                  (m.ivPercent >= 66 ? "⭐⭐ (2★ Bom)" : "⭐ (1★ Básico)"));
+
+    const ivBar = (label, val) => {
+      const pct = Math.round((val / 15) * 100);
+      const col = val === 15 ? "#ef4444" : "#f59e0b";
+      return `
+        <div style="margin:6px 0;text-align:left;">
+          <div style="display:flex;justify-content:space-between;font-size:11px;font-weight:800;color:#254a52;">
+            <span>${label}</span><span>${val} / 15</span>
+          </div>
+          <div style="width:100%;height:10px;background:#e2f2ec;border-radius:5px;overflow:hidden;display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px;">
+            <div style="background:${pct >= 33 ? col : '#d5e8e0'};height:100%;"></div>
+            <div style="background:${pct >= 66 ? col : '#d5e8e0'};height:100%;"></div>
+            <div style="background:${pct >= 95 ? col : '#d5e8e0'};height:100%;"></div>
+          </div>
+        </div>
+      `;
+    };
+
+    const appraisalCardHtml = showAppraisal ? `
+      <div class="pogo-white-card" style="border:2px solid #24c8a8;background:#f4fdf9;">
+        <div style="font-size:13px;font-weight:900;color:#1c7c74;margin-bottom:4px;">
+          🧑‍🔬 AVALIAÇÃO DO LÍDER DA EQUIPE ${p.avatar.team.toUpperCase()}
+        </div>
+        <div style="font-size:14px;font-weight:900;color:#d97706;margin-bottom:8px;">${stars} • IV ${m.ivPercent}%</div>
+        ${ivBar("ATAQUE (ATK)", m.ivAtk)}
+        ${ivBar("DEFESA (DEF)", m.ivDef)}
+        ${ivBar("PS / STAMINA (STA)", m.ivSta)}
+      </div>
+    ` : "";
+
+    openModal(`CP ${m.cp}`, `
+      <div class="pogo-white-card" style="text-align:center;">
+        <img src="${E.getPokemonCardImageSrc(m.speciesId, false, m.isShiny)}" style="width:116px;height:116px;object-fit:contain;"/>
+        <h2 style="color:#254a52;margin-top:4px;">${m.isShiny ? "✨ " : ""}${m.name}</h2>
+        <div style="width:55%;height:6px;background:#34d399;border-radius:3px;margin:6px auto;"></div>
+        <div style="font-size:12px;font-weight:800;color:#527a80;">${m.hp}/${m.maxHp} HP • Nível ${m.level}</div>
+
+        <div class="stat-capsules-row">
+          <div><div class="stat-cap-val">${weight}kg</div><div class="stat-cap-lbl">WEIGHT</div></div>
+          <div><div class="stat-cap-val">${sp.types.join("/")}</div><div class="stat-cap-lbl">TYPE</div></div>
+          <div><div class="stat-cap-val">${height}m</div><div class="stat-cap-lbl">HEIGHT</div></div>
+        </div>
+
+        <div style="display:flex;justify-content:space-around;background:#eef8f4;padding:10px;border-radius:12px;margin-bottom:12px;">
+          <div><div style="font-size:15px;font-weight:800;">✨ ${p.stardust.toLocaleString()}</div><div class="stat-cap-lbl">STARDUST</div></div>
+          <div><div style="font-size:15px;font-weight:800;">🍬 ${candies}</div><div class="stat-cap-lbl">${sp.name.toUpperCase()} CANDY</div></div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <button class="pogo-pill-btn" onclick="window.PokeGameUI.powerUpPokemon('${m.uid}')">
+            ⬆️ POWER UP (400 Stardust + 2 Candy)
+          </button>
+          ${sp.evolvesTo ? `
+            <button class="pogo-pill-btn" style="background:linear-gradient(90deg,#f59e0b,#ec4899);"
+              onclick="window.PokeGameUI.evolvePokemon('${m.uid}')">
+              🧬 EVOLVE COM MORPH 3D (${sp.evoCandyCost} Candy)
+            </button>
+          ` : ""}
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.showPokemonDetailSheet('${m.uid}', ${!showAppraisal})">
+              🌟 AVALIAR IVs
+            </button>
+            <button class="pogo-pill-btn secondary" onclick="window.PokeGameUI.setBuddy('${m.uid}')">
+              🐾 DEFINIR PARCEIRO
+            </button>
+          </div>
+        </div>
+      </div>
+
+      ${appraisalCardHtml}
+
+      <div class="pogo-white-card">
+        <div style="display:flex;justify-content:space-between;font-weight:800;font-size:13px;margin-bottom:8px;">
+          <span>⚡ Golpe Rápido: ${m.fastMove}</span><span>12</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-weight:800;font-size:13px;">
+          <span>💥 Golpe Carregado: ${m.chargedMove}</span><span>65</span>
+        </div>
+      </div>
+    `);
+  }
+
+  function powerUpPokemon(uid) {
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+    const mon = p.pokemonBox.find(m => m.uid === uid);
+    if (!mon) return;
+    if (mon.level >= cfg.maxPokemonLevelCap) {
+      return window.PokeStorage.showToast(`⚠️ Nível máximo (${cfg.maxPokemonLevelCap}) atingido!`, "warn");
+    }
+    if (p.stardust < 400 || (p.candies[mon.speciesId] || 0) < 2) {
+      return window.PokeStorage.showToast("⚠️ Stardust (400) ou Candies (2) insuficientes!", "warn");
+    }
+    p.stardust -= 400;
+    p.candies[mon.speciesId] -= 2;
+    mon.level += 1;
+    mon.cp = window.PokeData.calculateCP(mon.speciesId, mon.level, mon.ivAtk, mon.ivDef, mon.ivSta);
+    mon.maxHp = window.PokeData.calculateMaxHP(mon.speciesId, mon.level, mon.ivSta);
+    mon.hp = mon.maxHp;
+    window.PokeAudio.playGotchaFanfare();
+    window.PokeStorage.save();
+    showPokemonDetailSheet(uid, true);
+  }
+
+  function evolvePokemon(uid) {
+    const p = window.PokeStorage.getProfile();
+    const mon = p.pokemonBox.find(m => m.uid === uid);
+    if (!mon) return;
+    const sp = window.PokeData.getSpecies(mon.speciesId);
+    if (!sp.evolvesTo) return;
+    const cost = sp.evoCandyCost || 25;
+    if ((p.candies[mon.speciesId] || 0) < cost) {
+      return window.PokeStorage.showToast(`⚠️ Você precisa de ${cost} Candies para evoluir!`, "warn");
+    }
+    const oldSpeciesId = mon.speciesId;
+    const oldName = mon.name;
+    p.candies[oldSpeciesId] -= cost;
+    const targetSp = window.PokeData.getSpecies(sp.evolvesTo);
+    mon.speciesId = targetSp.id;
+    mon.name = targetSp.name;
+    mon.cp = window.PokeData.calculateCP(mon.speciesId, mon.level, mon.ivAtk, mon.ivDef, mon.ivSta);
+    mon.maxHp = window.PokeData.calculateMaxHP(mon.speciesId, mon.level, mon.ivSta);
+    mon.hp = mon.maxHp;
+    mon.fastMove = targetSp.fastMoves[0];
+    mon.chargedMove = targetSp.chargedMoves[0];
+
+    p.pokedexCaught[mon.speciesId] = (p.pokedexCaught[mon.speciesId] || 0) + 1;
+    p.candies[mon.speciesId] = (p.candies[mon.speciesId] || 0) + 5;
+    window.PokeStorage.addXp(500);
+    window.PokeStorage.save();
+
+    startEvolutionCutscene(uid, oldSpeciesId, targetSp.id, oldName, targetSp.name, mon.cp);
+  }
+
+  function setBuddy(uid) {
+    const p = window.PokeStorage.getProfile();
+    p.buddyUid = uid;
+    window.PokeStorage.save();
+    updateHud();
+    window.PokeStorage.showToast("🐾 Novo Pokémon Parceiro caminhando ao seu lado no Mapa 3D ASCII!", "success");
+    showPokemonDetailSheet(uid);
+  }
+
+  // ============================================================================
+  // 2. POKÉDEX REGIONAL COM SILHUETAS 3D EM ASCII (Ref: 22.18.12.jpeg)
+  // ============================================================================
+  function showPokedexModal(genIndex = 0) {
+    const p = window.PokeStorage.getProfile();
+    const gens = [
+      { name: "KANTO", start: 1, end: 151 },
+      { name: "JOHTO", start: 152, end: 251 },
+      { name: "HOENN", start: 252, end: 386 },
+      { name: "SINNOH", start: 387, end: 493 },
+      { name: "UNOVA", start: 494, end: 649 },
+      { name: "KALOS", start: 650, end: 721 },
+      { name: "ALOLA", start: 722, end: 809 },
+      { name: "GALAR", start: 810, end: 905 },
+      { name: "PALDEA", start: 906, end: 1025 }
+    ];
+    const g = gens[genIndex] || gens[0];
+
+    let caughtInGen = 0;
+    for (let id = g.start; id <= g.end; ++id) {
+      if (p.pokedexCaught[id]) caughtInGen++;
+    }
+
+    const tabsHtml = gens.map((gen, idx) => `
+      <button class="pogo-pill-btn ${idx === genIndex ? '' : 'secondary'}"
+        style="padding:6px 12px;font-size:11px;"
+        onclick="window.PokeGameUI.showPokedexModal(${idx})">
+        ${gen.name}
+      </button>
+    `).join("");
+
+    let cellsHtml = "";
+    for (let id = g.start; id <= g.end; ++id) {
+      const sp = window.PokeData.getSpecies(id);
+      const caught = !!p.pokedexCaught[id];
+      const imgSrc = E.getPokemonCardImageSrc(id, !caught, false);
+
+      cellsHtml += `
+        <div class="pogo-mon-cell" style="opacity:${caught ? '1' : '0.88'};">
+          <div class="pogo-cp-top">#${String(id).padStart(3, "0")}</div>
+          <img class="pogo-mon-img" src="${imgSrc}" alt="${sp.name}" loading="lazy"/>
+          <div class="pogo-mon-name">${caught ? sp.name : "???"}</div>
+        </div>
+      `;
+    }
+
+    openModal("POKÉDEX", `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:12px;">
+        ${tabsHtml}
+      </div>
+      <div class="pogo-region-banner">
+        <div>
+          <div class="pogo-region-title">${g.name}</div>
+          <div class="pogo-region-sub">Caught: ${caughtInGen} / ${g.end - g.start + 1}</div>
+        </div>
+        <div style="display:flex;gap:4px;">
+          <img src="${E.getPokemonCardImageSrc(g.start, false, false)}" style="width:46px;height:46px;"/>
+          <img src="${E.getPokemonCardImageSrc(g.start + 3, false, false)}" style="width:46px;height:46px;"/>
+          <img src="${E.getPokemonCardImageSrc(g.start + 6, false, false)}" style="width:46px;height:46px;"/>
+        </div>
+      </div>
+      <div class="pogo-3col-grid">${cellsHtml}</div>
+    `);
+  }
+
+  // ============================================================================
+  // 3. RADAR NEARBY COM 3 ABAS: POKÉMON | RAID | ANOMALY (Ref: 22.18.13 (1).jpeg)
+  // ============================================================================
+  function showNearbyTrackerModal(activeTab = "POKEMON") {
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+
+    const tabsHtml = `
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);border-bottom:2px solid #cbe8de;margin-bottom:14px;text-align:center;font-weight:800;font-size:13px;">
+        <div onclick="window.PokeGameUI.showNearbyTrackerModal('POKEMON')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'POKEMON' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'POKEMON' ? '3px solid #1c7c74' : 'none'};">
+          POKÉMON (${cityState.wildSpawns.length})
+        </div>
+        <div onclick="window.PokeGameUI.showNearbyTrackerModal('RAID')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'RAID' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'RAID' ? '3px solid #1c7c74' : 'none'};">
+          RAID (${cityState.gyms.length})
+        </div>
+        <div onclick="window.PokeGameUI.showNearbyTrackerModal('ANOMALY')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'ANOMALY' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'ANOMALY' ? '3px solid #1c7c74' : 'none'};">
+          ANOMALY
+        </div>
+      </div>
+    `;
+
+    if (activeTab === "RAID") {
+      const raidsHtml = cityState.gyms.map(gym => {
+        const bossSp = window.PokeData.getSpecies(gym.raidBossId);
+        return `
+          <div class="pogo-white-card" style="display:flex;justify-content:space-between;align-items:center;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <img src="${E.getPokemonCardImageSrc(bossSp.id, false, false)}" style="width:64px;height:64px;"/>
+              <div>
+                <div style="font-weight:800;font-size:14px;color:#254a52;">⭐⭐⭐⭐⭐ ${bossSp.name}</div>
+                <div style="font-size:11px;color:#527a80;">📍 ${gym.name} • CP 3400</div>
+              </div>
+            </div>
+            <button class="pogo-pill-btn" onclick="window.PokeGameUI.startLiveBattle('RAID', ${bossSp.id}, 3400, '👑 Raid Boss ${bossSp.name}', 60, 1500, true)">
+              LUTAR
+            </button>
+          </div>
+        `;
+      }).join("");
+      openModal("NEARBY RAIDS", `${tabsHtml}${raidsHtml}`);
+      return;
+    }
+
+    if (activeTab === "ANOMALY") {
+      const mult = window.PokeData.calculateRareProgressMultiplier(p, cfg).toFixed(2);
+      openModal("SCANNER DE ANOMALIA RARA", `
+        ${tabsHtml}
+        <div class="pogo-white-card" style="text-align:center;">
+          <div style="font-size:44px;">📡</div>
+          <h3 style="color:#1c7c74;margin:6px 0;">Multiplicador de Raros Ativo: ${mult}x</h3>
+          <p style="font-size:12px;color:#527a80;margin-bottom:12px;">
+            Carga da Anomalia de Bioma: <b>${p.anomalyCharge || 0}% / 100%</b> (Enche +12% a cada captura!)
+          </p>
+          <button class="pogo-pill-btn" onclick="window.PokeGameUI.triggerAnomalyScanner()">
+            ⚡ DISPARAR ANOMALIA RARA AGORA
+          </button>
+        </div>
+      `);
+      return;
+    }
+
+    const nearbyCells = cityState.wildSpawns.map((sp, idx) => {
+      const caught = !!p.pokedexCaught[sp.mon.speciesId];
+      const imgSrc = E.getPokemonCardImageSrc(sp.mon.speciesId, !caught, sp.mon.isShiny);
+      return `
+        <div class="nearby-ring-cell" onclick="window.PokeGameUI.closeModal(); window.PokeGameUI.startWildEncounterFromMap(${idx});">
+          <div class="nearby-blue-disc">
+            <img src="${imgSrc}" alt="${sp.mon.name}"/>
+          </div>
+          <div style="font-size:12px;font-weight:800;margin-top:8px;color:#254a52;">
+            ${caught ? sp.mon.name : "???"}
+          </div>
+          <div style="font-size:10px;color:#1c7c74;font-weight:700;">👣 Toque p/ Capturar</div>
+        </div>
+      `;
+    }).join("");
+
+    openModal("NEARBY", `
+      ${tabsHtml}
+      <div class="pogo-3col-grid">${nearbyCells}</div>
+    `);
+  }
+
+  // ============================================================================
+  // 4. PESQUISAS & GO PASS COM 3 ABAS: TODAY | FIELD | SPECIAL (Refs: 22.18.09.jpeg)
+  // ============================================================================
+  function showBattlePassModal(activeTab = "TODAY") {
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+    const currentTier = Math.floor(p.battlePassXp / cfg.battlePassXpPerTier) + 1;
+    const progressPct = Math.round(((p.battlePassXp % cfg.battlePassXpPerTier) / cfg.battlePassXpPerTier) * 100);
+    const tp = p.tasksProgress || { caught: 1, throws: 0, spins: 0, raids: 0, walkedM: 0, claimedIds: [] };
+
+    const tabsHtml = `
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);border-bottom:2px solid #cbe8de;margin-bottom:14px;text-align:center;font-weight:800;font-size:12px;">
+        <div onclick="window.PokeGameUI.showBattlePassModal('TODAY')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'TODAY' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'TODAY' ? '3px solid #1c7c74' : 'none'};">
+          TODAY & GO PASS
+        </div>
+        <div onclick="window.PokeGameUI.showBattlePassModal('FIELD')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'FIELD' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'FIELD' ? '3px solid #1c7c74' : 'none'};">
+          FIELD (${p.researchStamps || 3}/7)
+        </div>
+        <div onclick="window.PokeGameUI.showBattlePassModal('SPECIAL')"
+          style="padding:8px;cursor:pointer;color:${activeTab === 'SPECIAL' ? '#1c7c74' : '#8aa8ac'};border-bottom:${activeTab === 'SPECIAL' ? '3px solid #1c7c74' : 'none'};">
+          SPECIAL (${p.specialResearchStage || 1}/4)
+        </div>
+      </div>
+    `;
+
+    if (activeTab === "FIELD") {
+      const stamps = p.researchStamps || 3;
+      let stampDots = "";
+      for (let s = 1; s <= 7; ++s) {
+        stampDots += `
+          <div style="width:34px;height:34px;border-radius:50%;background:${s <= stamps ? '#f59e0b' : '#e2f2ec'};color:${s <= stamps ? '#fff' : '#7a9a9e'};display:flex;align-items:center;justify-content:center;font-weight:900;font-size:13px;">
+            ${s <= stamps ? "✓" : s}
+          </div>
+        `;
+      }
+
+      openModal("PESQUISA DE CAMPO (FIELD)", `
+        ${tabsHtml}
+        <div class="pogo-white-card" style="text-align:center;background:linear-gradient(135deg,#fef3c7,#fffbeb);border:2px solid #f59e0b;">
+          <div style="font-weight:900;font-size:14px;color:#b45309;margin-bottom:8px;">📦 DESCOBERTA EXTRAORDINÁRIA (${stamps}/7 SELOS)</div>
+          <div style="display:flex;justify-content:center;gap:6px;margin-bottom:10px;">${stampDots}</div>
+          <p style="font-size:11px;color:#92400e;margin-bottom:10px;">Gire PokéStops ou complete tarefas diárias para ganhar selos!</p>
+          ${stamps >= 7 ? `
+            <button class="pogo-pill-btn" onclick="window.PokeGameUI.claimBreakthroughBox()">
+              🎁 ABRIR CAIXA LENDÁRIA + 3.000 STARDUST!
+            </button>
+          ` : ""}
+        </div>
+
+        <div class="pogo-white-card">
+          <div style="font-weight:800;font-size:13px;color:#1c7c74;margin-bottom:8px;">📋 MISSÕES DE POKÉSTOP ATIVAS</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eef6f2;">
+            <span style="font-size:12px;font-weight:700;">Girar 3 PokéStops (${Math.min(3, tp.spins || 0)}/3)</span>
+            <button class="pogo-pill-btn" style="padding:5px 12px;font-size:11px;" onclick="window.PokeGameUI.claimResearchTask('field_spin3', 500, 15)">
+              RESGATAR
+            </button>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+            <span style="font-size:12px;font-weight:700;">Capturar 3 Pokémons (${Math.min(3, tp.caught || 1)}/3)</span>
+            <button class="pogo-pill-btn" style="padding:5px 12px;font-size:11px;" onclick="window.PokeGameUI.claimResearchTask('field_catch3', 650, 20)">
+              RESGATAR
+            </button>
+          </div>
+        </div>
+      `);
+      return;
+    }
+
+    if (activeTab === "SPECIAL") {
+      const stage = p.specialResearchStage || 1;
+      const stories = [
+        { title: "Etapa 1/4: Bem-vindo ao Mundo ASCII 3D!", desc: "Professor Willow descobriu que os Pokémons estão se materializando em malhas 3D de caracteres ASCII pela sua cidade! Explore as ruas e capture seus primeiros parceiros.", rewardMon: 133, rewardName: "Eevee" },
+        { title: "Etapa 2/4: O Segredo do Filtro Sobel 3D!", desc: "Excelente trabalho, Treinador! As bordas direcionais (| - / \\) revelam a energia oculta dos Ginásios e PokéStops. Continue fortalecendo sua equipe!", rewardMon: 147, rewardName: "Dratini" },
+        { title: "Etapa 3/4: Anomalias e Chefes de Raid!", desc: "Uma forte anomalia eletromagnética está atraindo Pokémons raros e Lendários para os Ginásios locais.", rewardMon: 143, rewardName: "Snorlax" },
+        { title: "Etapa 4/4: Mestre Lendário do PokeASCII!", desc: "Você dominou todas as técnicas de lançamento Curveball, Evolução com Morph 3D e Batalhas Ao Vivo!", rewardMon: 151, rewardName: "Mew Mítico" }
+      ];
+      const st = stories[Math.min(stories.length - 1, stage - 1)];
+
+      openModal("PESQUISA ESPECIAL (SPECIAL)", `
+        ${tabsHtml}
+        <div class="pogo-white-card" style="background:linear-gradient(135deg,#e0f2fe,#f0fdf4);border:2px solid #24c8a8;">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+            <div style="font-size:40px;">🧑‍🔬</div>
+            <div>
+              <div style="font-weight:900;font-size:14px;color:#1c7c74;">PROFESSOR WILLOW</div>
+              <div style="font-weight:800;font-size:12px;color:#254a52;">${st.title}</div>
+            </div>
+          </div>
+          <p style="font-size:12px;color:#3b5e64;line-height:1.45;margin-bottom:12px;">"${st.desc}"</p>
+          <button class="pogo-pill-btn" style="width:100%;" onclick="window.PokeGameUI.advanceSpecialResearch(${st.rewardMon})">
+            🌟 COMPLETAR ETAPA & ENCONTRAR ${st.rewardName.toUpperCase()} EM 3D!
+          </button>
+        </div>
+      `);
+      return;
+    }
+
+    // Aba TODAY: GO Pass + Weekly Tasks
+    let tiersHtml = "";
+    for (let t = 1; t <= Math.max(12, currentTier + 3); ++t) {
+      const unlocked = t <= currentTier;
+      const claimed = p.battlePassClaimed.includes(t);
+      const rewardDesc = t % 5 === 0 ? "👑 Encontro Lendário + 100 PokéCoins" :
+                         (t % 2 === 0 ? "✨ 1.000 Stardust + 5 Ultra Balls" : "🪙 35 PokéCoins + 3 Rare Candies");
+
+      tiersHtml += `
+        <div class="pogo-white-card" style="display:flex;justify-content:space-between;align-items:center;border-left:5px solid ${claimed ? '#22c55e' : (unlocked ? '#26ccaa' : '#cbd5e1')};">
+          <div>
+            <div style="font-weight:800;font-size:14px;color:#254a52;">RANK ${t}</div>
+            <div style="font-size:12px;color:#527a80;">${rewardDesc}</div>
+          </div>
+          <div>
+            ${claimed ? `<span style="color:#16a34a;font-weight:800;font-size:12px;">✓ RESGATADO</span>` :
+              (unlocked ? `<button class="pogo-pill-btn" style="padding:7px 14px;font-size:11px;" onclick="window.PokeGameUI.claimPassTier(${t})">RESGATAR</button>` :
+              `<span style="font-size:11px;color:#94a3b8;">🔒 Bloqueado</span>`)}
+          </div>
+        </div>
+      `;
+    }
+
+    openModal("GO PASS & PESQUISAS", `
+      ${tabsHtml}
+      <div class="pogo-white-card" style="background:linear-gradient(135deg,#0284c7,#26ccaa);color:#ffffff;text-align:center;">
+        <div style="font-size:12px;font-weight:800;letter-spacing:1px;">PASSE 100% GRATUITO (ZERO GACHA)</div>
+        <div style="font-size:32px;font-weight:900;margin:4px 0;">RANK ${currentTier}</div>
+        <div style="width:85%;height:10px;background:rgba(255,255,255,0.28);border-radius:5px;margin:8px auto;overflow:hidden;">
+          <div style="width:${progressPct}%;height:100%;background:#fde047;"></div>
+        </div>
+        <div style="font-size:11px;font-weight:700;">Progresso para o próximo Rank: ${progressPct}%</div>
+      </div>
+
+      <div class="pogo-white-card">
+        <div style="font-weight:800;font-size:13px;color:#1c7c74;margin-bottom:8px;">📋 TAREFAS SEMANAIS (AUTO-RASTREADAS)</div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid #e5f0ec;">
+          <span>Capturar Pokémons (${tp.caught || 1}/15)</span><b style="color:#1c7c74;">+200 PTS</b>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid #e5f0ec;">
+          <span>Acertar Curveballs (${p.stats.curveballsLanded || 0}/5)</span><b style="color:#1c7c74;">+150 PTS</b>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid #e5f0ec;">
+          <span>Caminhar no Mapa (${Math.round(p.distanceWalkedM || 0)}/500m)</span><b style="color:#1c7c74;">+250 PTS</b>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;">
+          <span>Vencer Ginásios ou Raids (${(p.stats.gymsWon || 0) + (p.stats.raidsWon || 0)}/3)</span><b style="color:#1c7c74;">+300 PTS</b>
+        </div>
+      </div>
+
+      ${tiersHtml}
+    `);
+  }
+
+  function claimResearchTask(taskId, dust, coins) {
+    const p = window.PokeStorage.getProfile();
+    p.stardust += dust;
+    p.pokecoins += coins;
+    p.researchStamps = Math.min(7, (p.researchStamps || 0) + 1);
+    window.PokeStorage.addXp(400);
+    window.PokeAudio.playGotchaFanfare();
+    window.PokeStorage.showToast(`🎁 Tarefa concluída! +${dust} Stardust, +${coins} PokéCoins e +1 Selo de Pesquisa!`, "success");
+    showBattlePassModal("FIELD");
+  }
+
+  function claimBreakthroughBox() {
+    const p = window.PokeStorage.getProfile();
+    p.researchStamps = 0;
+    p.stardust += 3000;
+    p.pokecoins += 75;
+    window.PokeStorage.save();
+    closeModal();
+    spawnWildPokemon(144, true); // Articuno Lendário!
+    toggleSceneMode("AR_CAPTURE");
+  }
+
+  function advanceSpecialResearch(rewardSpeciesId) {
+    const p = window.PokeStorage.getProfile();
+    p.specialResearchStage = Math.min(4, (p.specialResearchStage || 1) + 1);
+    p.stardust += 1500;
+    window.PokeStorage.addXp(1000);
+    window.PokeStorage.save();
+    closeModal();
+    spawnWildPokemon(rewardSpeciesId, true);
+    toggleSceneMode("AR_CAPTURE");
+  }
+
+  function claimPassTier(tier) {
+    const p = window.PokeStorage.getProfile();
+    if (p.battlePassClaimed.includes(tier)) return;
+    p.battlePassClaimed.push(tier);
+
+    if (tier % 5 === 0) {
+      p.pokecoins += 100;
+      p.bag.master_ball = (p.bag.master_ball || 0) + 1;
+      spawnWildPokemon(150, true);
+      toggleSceneMode("AR_CAPTURE");
+    } else if (tier % 2 === 0) {
+      p.stardust += 1000;
+      p.bag.ultra_ball = (p.bag.ultra_ball || 0) + 5;
+    } else {
+      p.pokecoins += 35;
+      if (p.pokemonBox[0]) {
+        const spId = p.pokemonBox[0].speciesId;
+        p.candies[spId] = (p.candies[spId] || 0) + 5;
+      }
+    }
+    window.PokeAudio.playGotchaFanfare();
+    window.PokeStorage.save();
+    updateHud();
+    showBattlePassModal("TODAY");
+  }
+
+  // ============================================================================
+  // 5. MOCHILA DE ITENS (ITEMS) E LOJA GRATUITA (SHOP)
+  // ============================================================================
+  function showBagModal(filter = "all") {
+    const p = window.PokeStorage.getProfile();
+    const entries = Object.entries(window.PokeData.ITEMS).filter(([, item]) => {
+      if (filter === "berry") return item.type === "berry";
+      if (filter === "ball") return item.type === "ball";
+      return true;
     });
+
+    const listHtml = entries.map(([key, item]) => {
+      const count = p.bag[key] || 0;
+      return `
+        <div class="pogo-white-card" style="display:flex;justify-content:space-between;align-items:center;"
+          onclick="window.PokeGameUI.useItem('${key}')">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="font-size:30px;">${item.icon}</div>
+            <div>
+              <div style="font-weight:800;font-size:14px;color:#254a52;">${item.name}</div>
+              <div style="font-size:11px;color:#527a80;">Quantidade: <b>x${count}</b></div>
+            </div>
+          </div>
+          <button class="pogo-pill-btn" style="padding:7px 14px;font-size:11px;">USAR</button>
+        </div>
+      `;
+    }).join("");
+
+    openModal("ITEMS", listHtml);
+  }
+
+  function useItem(itemKey) {
+    const p = window.PokeStorage.getProfile();
+    const item = window.PokeData.ITEMS[itemKey];
+    if (!item || (p.bag[itemKey] || 0) <= 0) {
+      return window.PokeStorage.showToast("⚠️ Você não possui este item!", "warn");
+    }
+
+    if (item.type === "ball") {
+      activeBallType = itemKey;
+      window.PokeStorage.showToast(`${item.icon} ${item.name} equipada para captura!`, "success");
+      closeModal();
+    } else if (item.type === "berry") {
+      if (gameScene !== "AR_CAPTURE") {
+        toggleSceneMode("AR_CAPTURE");
+      }
+      p.bag[itemKey]--;
+      activeBerry = itemKey;
+      if (p.tasksProgress) p.tasksProgress.berries = (p.tasksProgress.berries || 0) + 1;
+      window.PokeStorage.save();
+      window.PokeStorage.showToast(`${item.icon} ${item.name} lançada para ${wildMon ? wildMon.name : 'o Pokémon'}!`, "success");
+      closeModal();
+    } else {
+      p.bag[itemKey]--;
+      window.PokeStorage.addXp(250);
+      window.PokeStorage.showToast(`${item.icon} ${item.name} ativado (+250 XP)!`, "success");
+      showBagModal();
+    }
+  }
+
+  function showShopModal() {
+    const p = window.PokeStorage.getProfile();
+    const listHtml = Object.entries(window.PokeData.ITEMS).map(([key, item]) => `
+      <div class="pogo-white-card" style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div style="font-size:28px;">${item.icon}</div>
+          <div>
+            <div style="font-weight:800;font-size:14px;">${item.name}</div>
+            <div style="font-size:11px;color:#527a80;">Na mochila: x${p.bag[key] || 0}</div>
+          </div>
+        </div>
+        <button class="pogo-pill-btn" style="padding:7px 14px;font-size:11px;"
+          onclick="window.PokeGameUI.buyShopItem('${key}')">
+          🪙 ${item.price}
+        </button>
+      </div>
+    `).join("");
+
+    openModal("SHOP (100% GRATUITA)", `
+      <div class="pogo-white-card" style="text-align:center;background:#eef8f4;">
+        <div style="font-size:18px;font-weight:900;color:#1c7c74;">🪙 ${p.pokecoins} POKÉCOINS</div>
+        <div style="font-size:11px;color:#527a80;">Ganhe moedas gratuitas em Ginásios, Raids e no GO Pass!</div>
+      </div>
+      ${listHtml}
+    `);
+  }
+
+  function buyShopItem(itemKey) {
+    const p = window.PokeStorage.getProfile();
+    const item = window.PokeData.ITEMS[itemKey];
+    if (!item) return;
+    if (p.pokecoins < item.price) {
+      return window.PokeStorage.showToast("⚠️ PokéCoins insuficientes! Vença um Ginásio ou Raid!", "warn");
+    }
+    p.pokecoins -= item.price;
+    p.bag[itemKey] = (p.bag[itemKey] || 0) + 1;
+    window.PokeAudio.playUiClick();
+    window.PokeStorage.save();
+    showShopModal();
+  }
+
+  // ============================================================================
+  // 6. HUB DE BATALHAS, GINÁSIOS, PERFIL E SETTINGS
+  // ============================================================================
+  function showGymDetailModal(gymIdx) {
+    const gym = cityState.gyms[gymIdx] || cityState.gyms[0];
+    const guardSp = window.PokeData.getSpecies(gym.guardSpeciesId);
+    const bossSp = window.PokeData.getSpecies(gym.raidBossId);
+
+    openModal(gym.name.toUpperCase(), `
+      <div class="pogo-white-card" style="text-align:center;">
+        <div style="font-size:12px;font-weight:800;color:#1c7c74;">CONTROLADO PELA EQUIPE ${gym.team.toUpperCase()}</div>
+        <img src="${E.getPokemonCardImageSrc(guardSp.id, false, false)}" style="width:92px;height:92px;"/>
+        <h3 style="margin:4px 0;">Guardião: ${guardSp.name} (CP 1580)</h3>
+        <button class="pogo-pill-btn" style="width:100%;margin-top:8px;"
+          onclick="window.PokeGameUI.startLiveBattle('GYM', ${guardSp.id}, 1580, '${gym.name}', 50, 800, false)">
+          ⚔️ DESAFIAR GINÁSIO AO VIVO EM 3D (+50 PokéCoins)
+        </button>
+      </div>
+
+      <div class="pogo-white-card" style="text-align:center;border:2px solid #f59e0b;">
+        <div style="font-size:12px;font-weight:800;color:#d97706;">👑 RAID LENDÁRIA 5 ESTRELAS ATIVA!</div>
+        <img src="${E.getPokemonCardImageSrc(bossSp.id, false, false)}" style="width:96px;height:96px;"/>
+        <h3 style="margin:4px 0;">Raid Boss: ${bossSp.name} (CP 3600)</h3>
+        <button class="pogo-pill-btn" style="width:100%;margin-top:8px;background:linear-gradient(90deg,#f59e0b,#ef4444);"
+          onclick="window.PokeGameUI.startLiveBattle('RAID', ${bossSp.id}, 3600, '👑 Raid Boss ${bossSp.name}', 60, 1500, true)">
+          🔥 ENTRAR NA RAID 3D AO VIVO & CAPTURAR BOSS
+        </button>
+      </div>
+    `);
+  }
+
+  function showBattleHubModal() {
+    openModal("BATTLE LEAGUE & RAIDS 3D", `
+      <div class="pogo-white-card" style="text-align:center;">
+        <img src="${E.getPokemonCardImageSrc(150, false, false)}" style="width:88px;height:88px;"/>
+        <h3 style="color:#1c7c74;">👑 Raid Lendária: Mewtwo (CP 3850)</h3>
+        <p style="font-size:12px;color:#527a80;margin:6px 0 10px;">Lute ao vivo em ASCII 3D e capture o Boss com IV 10-15!</p>
+        <button class="pogo-pill-btn" style="width:100%;"
+          onclick="window.PokeGameUI.startLiveBattle('RAID', 150, 3850, '👑 Raid Lendária Mewtwo', 65, 1600, true)">
+          ENTRAR NA RAID AO VIVO
+        </button>
+      </div>
+
+      <div class="pogo-white-card" style="text-align:center;">
+        <h3 style="color:#254a52;">🏟️ Ginásio Municipal</h3>
+        <p style="font-size:12px;color:#527a80;margin:6px 0 10px;">Defenda sua Equipe e receba +50 PokéCoins gratuitas!</p>
+        <button class="pogo-pill-btn" style="width:100%;"
+          onclick="window.PokeGameUI.startLiveBattle('GYM', 149, 2100, '🏟️ Ginásio Municipal', 50, 900, false)">
+          BATALHAR NO GINÁSIO AO VIVO
+        </button>
+      </div>
+
+      <div class="pogo-white-card" style="text-align:center;">
+        <h3 style="color:#7e22ce;">🚀 Líder Vilão Equipe Cyber</h3>
+        <p style="font-size:12px;color:#527a80;margin:6px 0 10px;">Resgate Pokémons e ganhe Stardust extra!</p>
+        <button class="pogo-pill-btn" style="width:100%;"
+          onclick="window.PokeGameUI.startLiveBattle('VILLAIN', 94, 1850, '🚀 Líder Cyber Rocket', 40, 1000, false)">
+          DUELAR CONTRA VILÃO AO VIVO
+        </button>
+      </div>
+    `);
+  }
+
+  function showTrainerProfileModal() {
+    const p = window.PokeStorage.getProfile();
+    const cfg = window.PokeBalance.get();
+    const rareMult = window.PokeData.calculateRareProgressMultiplier(p, cfg).toFixed(2);
+    const buddy = p.pokemonBox.find(m => m.uid === p.buddyUid) || p.pokemonBox[0];
+
+    openModal(`${p.trainerName} (NÍVEL ${p.level})`, `
+      <div class="pogo-white-card" style="text-align:center;">
+        <div style="font-size:48px;">${p.gender === "F" ? "👩" : "🧑"}</div>
+        <h3 style="color:#1c7c74;">Equipe ${p.avatar.team} • Prestígio #${p.prestigeRank || 0}</h3>
+        <div class="stat-capsules-row">
+          <div><div class="stat-cap-val">${(p.distanceWalkedM / 1000).toFixed(2)}km</div><div class="stat-cap-lbl">WALKED</div></div>
+          <div><div class="stat-cap-val">${p.stats.totalCaught}</div><div class="stat-cap-lbl">CAUGHT</div></div>
+          <div><div class="stat-cap-val">${rareMult}x</div><div class="stat-cap-lbl">RARE BOOST</div></div>
+        </div>
+        ${buddy ? `
+          <div style="display:flex;align-items:center;justify-content:center;gap:10px;background:#eef8f4;padding:10px;border-radius:14px;">
+            <img src="${E.getPokemonCardImageSrc(buddy.speciesId, false, buddy.isShiny)}" style="width:52px;height:52px;"/>
+            <div style="text-align:left;">
+              <div style="font-weight:800;font-size:13px;">Parceiro: ${buddy.name} (CP ${buddy.cp})</div>
+              <div style="font-size:11px;color:#1c7c74;">Progresso Candy: ${Math.round(p.buddyWalkProgressM)}m / ${cfg.buddyDistancePerCandyM}m</div>
+            </div>
+          </div>
+        ` : ""}
+      </div>
+    `);
+  }
+
+  function triggerAnomalyScanner() {
+    const p = window.PokeStorage.getProfile();
+    if ((p.anomalyCharge || 0) < 100) {
+      window.PokeStorage.showToast(`📡 Scanner de Anomalia em ${p.anomalyCharge || 0}%! Capture Pokémons para carregar 100%!`, "info");
+      return;
+    }
+    p.anomalyCharge = 0;
+    const cfg = Object.assign({}, window.PokeBalance.get(), {
+      rareSpawnMultiplier: 14.0,
+      shinyProbability: 0.08,
+      wildIvFloor: 12
+    });
+    wildMon = window.PokeData.rollWeightedSpawn(cfg, p.level + 5, p);
+    E.getPokemonMesh(wildMon.speciesId, wildMon.isShiny);
+    window.PokeStorage.save();
+    closeRadialMenu();
+    closeModal();
+    toggleSceneMode("AR_CAPTURE");
+    window.PokeAudio.playGotchaFanfare();
+    window.PokeStorage.showToast(`🌌 ANOMALIA RARA ATIVADA! Um ${wildMon.name} (IV ${wildMon.ivPercent}%) surgiu em ASCII 3D!`, "warn");
+  }
+
+  function showSystemAndCrowdfundingModal() {
+    openModal("SETTINGS & CROWDFUNDING", `
+      <div class="pogo-white-card">
+        <h4 style="color:#1c7c74;margin-bottom:8px;">🔊 Áudio, Câmera & Salvamento Resiliente</h4>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="pogo-pill-btn" onclick="window.PokeAudio.toggleSound()">🔊 Som ON/OFF</button>
+          <button class="pogo-pill-btn secondary" onclick="window.PokeAudio.toggleBgm()">🎵 Música BGM</button>
+          <button class="pogo-pill-btn secondary" onclick="window.PokeStorage.exportSaveFile()">📥 Exportar Save</button>
+          <button class="pogo-pill-btn secondary" onclick="document.getElementById('import-file-inp').click()">📤 Importar Save</button>
+          <a href="admin.html" target="_blank" class="pogo-pill-btn secondary" style="text-decoration:none;">⚙️ Painel Admin</a>
+        </div>
+      </div>
+
+      <div class="pogo-white-card">
+        <h4 style="color:#1c7c74;margin-bottom:6px;">🚀 Crowdfunding & Créditos Open-Source (MIT)</h4>
+        <p style="font-size:12px;color:#527a80;line-height:1.45;">
+          Projeto educacional 100% gratuito e sem fins lucrativos.<br/>
+          • <b>Meta 1:</b> Engine 3D G-Buffer/Sobel 100% ASCII + Mapa GPS OpenStreetMap (Concluído!)<br/>
+          • <b>Meta 2:</b> Servidor Multiplayer WebSocket Global (PvP e Trocas ao vivo)<br/>
+          • <b>Créditos:</b> Pokémon © Nintendo/Creatures Inc./GAME FREAK • Ruas © OpenStreetMap contributors • Sprites 3D Voxelizados © PokéAPI.
+        </p>
+      </div>
+    `);
+  }
+
+  function finishCharacterCreation() {
+    const p = window.PokeStorage.getProfile();
+    p.trainerName = (document.getElementById("inp-trainer-name").value || "AshASCII").trim();
+    p.gender = document.getElementById("inp-gender").value;
+    p.avatar.skinColor = document.getElementById("inp-skin").value;
+    p.avatar.outfitColor = document.getElementById("inp-outfit").value;
+    p.avatar.team = document.getElementById("inp-team").value;
+    p.created = true;
+    window.PokeStorage.save();
+
+    document.getElementById("onboarding-screen").style.display = "none";
+    window.PokeAudio.init();
+    window.PokeAudio.playGotchaFanfare();
+    updateHud();
+    startRealGpsTracking(false);
+  }
+
+  // ============================================================================
+  // LOOP PRINCIPAL DE ANIMAÇÃO 60 FPS (100% PURE 3D G-BUFFER ASCII!)
+  // ============================================================================
+  let lastFrameTime = performance.now();
+  function mainLoop(now) {
+    const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
+    lastFrameTime = now;
+
+    fpsFrames++;
+    if (now - fpsLastTime >= 1000) {
+      currentFps = fpsFrames;
+      fpsFrames = 0;
+      fpsLastTime = now;
+      if (currentFps < 26 && qualityTier > 1) {
+        qualityTier--;
+        resizeViewport();
+      }
+    }
+
+    const timeSec = now * 0.001;
+    updateCityMovement(dt);
+    updatePokeballPhysics(dt);
+
+    // 100% PURE 3D G-BUFFER ASCII RENDERING PIPELINE EM TODAS AS CENAS!
+    rasterize3DScene(timeSec);
+    renderAsciiCanvas(timeSec);
+
+    requestAnimationFrame(mainLoop);
   }
 
   async function init() {
     canvas = document.getElementById("ascii-canvas");
     ctx = canvas.getContext("2d", { alpha: false });
-    video = document.getElementById("cam-video");
-    offCanvas = document.createElement("canvas");
-    offCtx = offCanvas.getContext("2d", { willReadFrequently: true });
+    videoEl = document.getElementById("cam-video");
 
-    const resize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    };
-    window.addEventListener("resize", resize);
-    resize();
+    sampleCanvas = document.createElement("canvas");
+    sampleCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
 
-    const prof = await S.initAndLoad();
-    spawnWildWave(false);
-    setupInteractions();
-    startRealGpsTracking(false);
-    updateHudCounters();
+    resizeViewport();
+    window.addEventListener("resize", resizeViewport);
 
-    // Atualiza ícones da pílula Nearby após os sprites oficiais carregarem
-    setTimeout(updateHudCounters, 1500);
-    setTimeout(updateHudCounters, 3500);
-
-    if (!prof.created) {
+    await window.PokeStorage.initAndLoad();
+    const p = window.PokeStorage.getProfile();
+    if (!p.created) {
       document.getElementById("onboarding-screen").style.display = "flex";
     }
 
-    const importInp = document.getElementById("import-file-inp");
-    if (importInp) {
-      importInp.addEventListener("change", (ev) => {
-        const f = ev.target.files[0];
+    const fileInp = document.getElementById("import-file-inp");
+    if (fileInp) {
+      fileInp.addEventListener("change", (e) => {
+        const f = e.target.files[0];
         if (!f) return;
         const reader = new FileReader();
         reader.onload = () => {
-          if (S.importSaveJson(reader.result)) updateHudCounters();
+          if (window.PokeStorage.importSaveJson(reader.result)) {
+            updateHud();
+            closeModal();
+          }
         };
         reader.readAsText(f);
       });
     }
 
-    let prevTime = performance.now();
-    function loop(now) {
-      const dt = Math.min(0.05, Math.max(0.001, (now - prevTime) / 1000));
-      prevTime = now;
-      emaFrameMs = emaFrameMs * 0.9 + (dt * 1000) * 0.1;
-      const timeSec = now / 1000;
+    initCityEntities();
+    spawnWildPokemon(25);
+    bindInputEvents();
+    updateHud();
+    startRealGpsTracking(false);
 
-      updateCityMovement(dt);
-      updateCaptureAndWildPhysics(dt, timeSec);
-      updateLiveBattlePhysics(dt);
-      if (gameScene === "EVOLUTION_CUTSCENE" && evoCutscene) {
-        evoCutscene.timer += dt;
-        if (evoCutscene.timer >= evoCutscene.duration) {
-          const finishedUid = evoCutscene.uid;
-          evoCutscene = null;
-          toggleSceneMode("CITY_MAP");
-          showPokemonDetailCardModal(finishedUid);
-        }
-      }
-      renderMainViewport(timeSec);
-
-      requestAnimationFrame(loop);
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js").catch(() => {});
     }
-    requestAnimationFrame(loop);
+
+    requestAnimationFrame(mainLoop);
   }
 
-  function finishCharacterCreation() {
-    A.init();
-    A.playGotchaFanfare();
-    const prof = S.getProfile();
-    const nameVal = (document.getElementById("inp-trainer-name").value || "").trim();
-    prof.trainerName = nameVal.length > 0 ? nameVal : "Treinador";
-    prof.gender = document.getElementById("inp-gender").value;
-    prof.avatar.skinColor = document.getElementById("inp-skin").value;
-    prof.avatar.outfitColor = document.getElementById("inp-outfit").value;
-    prof.avatar.team = document.getElementById("inp-team").value;
-    prof.created = true;
-    S.save();
-
-    document.getElementById("onboarding-screen").style.display = "none";
-    updateHudCounters();
-  }
+  window.addEventListener("DOMContentLoaded", init);
 
   return {
-    init,
-    finishCharacterCreation,
+    toggleRealCamera,
+    toggleSceneMode,
+    adjustZoom,
+    startRealGpsTracking,
     openRadialMenu,
     closeRadialMenu,
-    adjustZoom,
-    throwPokeball,
-    toggleSceneMode,
-    toggleRealCamera,
-    startRealGpsTracking,
-    triggerAnomalyScanner,
-    enterArEncounterWithWild,
-    showTrainerProfileModal,
-    showRareProgressAndMedalsModal,
-    showPokemonBoxModal,
-    showPokemonDetailCardModal,
-    showPokedexModal,
-    showNearbyTrackerModal,
-    showShopModal,
-    claimDailyFreeBox,
-    buyWithFreeCoins,
-    syncCurrentPageWiki,
-    showBagModal,
-    useBagItem,
-    showBattleHubModal,
-    startBattle,
-    fleeLiveBattle,
+    startWildEncounterFromMap,
+    spawnWildPokemon,
+    startLiveBattle,
     triggerPlayerAttack,
     triggerBattleDodge,
     triggerBattleShield,
-    showBattlePassModal,
-    claimBattlePassTier,
-    showSystemAndCrowdfundingModal,
-    submitQuickBugReport,
-    installOneClickPwa,
-    uninstallOneClickPwa,
+    fleeLiveBattle,
+    startEvolutionCutscene,
+    showPokemonBoxModal,
+    incubateEgg,
+    showPokemonDetailSheet,
     powerUpPokemon,
     evolvePokemon,
-    setBuddyPokemon,
+    setBuddy,
+    showPokedexModal,
+    showNearbyTrackerModal,
+    showBagModal,
+    useItem,
+    showShopModal,
+    buyShopItem,
+    showBattleHubModal,
+    showGymDetailModal,
+    showBattlePassModal,
+    claimResearchTask,
+    claimBreakthroughBox,
+    advanceSpecialResearch,
+    claimPassTier,
+    showTrainerProfileModal,
+    triggerAnomalyScanner,
+    showSystemAndCrowdfundingModal,
+    finishCharacterCreation,
     closeModal
   };
 })();
-
-window.addEventListener("DOMContentLoaded", () => {
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").catch(() => {});
-  }
-  window.PokeGameUI.init();
-});
