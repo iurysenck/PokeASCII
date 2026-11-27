@@ -483,134 +483,166 @@
 <!-- ==================== HUD DO MAPA 3D DA CIDADE (Ref: 22.18.13 (2).jpeg) ==================== -->
 <div id="map-overworld-hud">
   <div id="gps-pill" onclick="window.PokeGameUI.toggleNavModeOrResyncGps()" title="Toque para alternar entre GPS Live e Joystick Livre">
-    🛰️ GPS LIVE • Localizando sua rua...
+    [GPS LIVE] Localizando sua rua...
   </div>
 
   <div id="right-floating-tools">
-    <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(-3.2)" title="Aumentar Zoom (+)">＋</div>
-    <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(3.2)" title="Diminuir Zoom (-)">－</div>
-    <div class="circle-tool-btn" id="btn-nav-mode" onclick="window.PokeGameUI.toggleNavModeOrResyncGps()" title="Alternar GPS Live / Joystick Livre">🛰️</div>
+    <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(-3.2)" title="Aumentar Zoom (+)">
+      <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2.8" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </div>
+    <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(3.2)" title="Diminuir Zoom (-)">
+      <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2.8" fill="none"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </div>
+    <div class="circle-tool-btn" id="btn-nav-mode" onclick="window.PokeGameUI.toggleNavModeOrResyncGps()" title="Alternar GPS Live / Joystick Livre">
+      <svg viewBox="0 0 24 24" width="19" height="19" stroke="currentColor" stroke-width="2.2" fill="none"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>
+    </div>
   </div>
 
   <div id="joystick-zone" title="Arraste para caminhar pelas ruas da sua cidade">
     <div id="joystick-knob"></div>
   </div>
 
-  <!-- Canto Inferior Esquerdo: Retrato do Treinador + Nível + Parceiro -->
+  <!-- Canto Inferior Esquerdo: Retrato do Treinador + Nivel + Parceiro -->
   <div id="trainer-corner" onclick="window.PokeGameUI.showTrainerProfileModal()">
     <div class="avatar-bubble" id="hud-avatar-icon">
-      🧑
+      <svg viewBox="0 0 24 24" width="28" height="28" stroke="#ffffff" stroke-width="2" fill="none"><circle cx="12" cy="8" r="4"/><path d="M5 20c0-4 3-7 7-7s7 3 7 7"/></svg>
       <span class="level-badge" id="hud-level-num">1</span>
       <span class="trainer-name-label" id="hud-trainer-name">Treinador</span>
     </div>
     <div class="buddy-bubble" id="hud-buddy-icon"></div>
   </div>
 
-  <!-- Centro Inferior: Botão Único da Pokébola -->
+  <!-- Centro Inferior: Botao Unico da Pokebola -->
   <div id="center-pokeball-btn" onclick="window.PokeGameUI.openRadialMenu()" title="Menu Principal"></div>
 
-  <!-- Canto Inferior Direito: Binóculos (GO Pass / Pesquisas) + Pílula Nearby (3 Silhuetas) -->
+  <!-- Canto Inferior Direito: Binoculos (GO Pass / Pesquisas) + Pilula Nearby (3 Silhuetas) -->
   <div id="right-bottom-corner">
     <div id="research-binoculars-btn" onclick="window.PokeGameUI.showBattlePassModal()" title="GO Pass & Pesquisas">
-      🔭
+      <svg viewBox="0 0 24 24" width="22" height="22" stroke="#ffffff" stroke-width="2.2" fill="none"><circle cx="7" cy="15" r="4"/><circle cx="17" cy="15" r="4"/><path d="M5 12l2-6h3l1 4h2l1-4h3l2 6"/></svg>
       <span class="notif-dot"></span>
     </div>
-    <div id="nearby-pill" onclick="window.PokeGameUI.showNearbyTrackerModal()" title="Pokémons e Raids Próximos"></div>
+    <div id="nearby-pill" onclick="window.PokeGameUI.showNearbyTrackerModal()" title="Pokemons e Raids Proximos"></div>
   </div>
 </div>
 
 <!-- ==================== HUD DO ENCONTRO DE CAPTURA AR 3D ==================== -->
 <div id="ar-encounter-hud">
-  <button class="ar-top-left-flee" onclick="window.PokeGameUI.toggleSceneMode('CITY_MAP')" title="Fugir / Voltar ao Mapa">🏃</button>
-  <button class="ar-top-right-cam" id="btn-ar-cam" onclick="window.PokeGameUI.toggleRealCamera()">📷 AR+ Câmera</button>
-  <button class="ar-bottom-left-berry" onclick="window.PokeGameUI.showBagModal('berry')" title="Usar Fruta (Berry)">🍓</button>
-  <button class="ar-bottom-right-ball" onclick="window.PokeGameUI.showBagModal('ball')" title="Trocar Pokébola">🔴</button>
+  <button class="ar-top-left-flee" onclick="window.PokeGameUI.toggleSceneMode('CITY_MAP')" title="Fugir / Voltar ao Mapa">
+    <svg viewBox="0 0 24 24" width="22" height="22" stroke="#254a52" stroke-width="2.4" fill="none"><polyline points="15 18 9 12 15 6"/></svg>
+  </button>
+  <button class="ar-top-right-cam" id="btn-ar-cam" onclick="window.PokeGameUI.toggleRealCamera()">
+    <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2.2" fill="none" style="vertical-align:middle;margin-right:4px;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>AR+ Camera
+  </button>
+  <button class="ar-bottom-left-berry" onclick="window.PokeGameUI.showBagModal('berry')" title="Usar Fruta (Berry)">
+    <svg viewBox="0 0 24 24" width="24" height="24" stroke="#e11d48" stroke-width="2.2" fill="none"><path d="M12 5c-4 0-7 3-7 8 0 4 3 7 7 7s7-3 7-7c0-5-3-8-7-8z"/><path d="M12 2v3"/></svg>
+  </button>
+  <button class="ar-bottom-right-ball" onclick="window.PokeGameUI.showBagModal('ball')" title="Trocar Pokebola">
+    <svg viewBox="0 0 24 24" width="24" height="24" stroke="#2563eb" stroke-width="2.2" fill="none"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><circle cx="12" cy="12" r="3"/></svg>
+  </button>
 </div>
 
 <!-- ==================== HUD DA ARENA DE BATALHA 3D AO VIVO ==================== -->
 <div id="live-battle-hud" style="position:absolute;inset:0;pointer-events:none;display:none;z-index:18;">
-  <button class="ar-top-left-flee" onclick="window.PokeGameUI.fleeLiveBattle()" title="Sair da Batalha" style="pointer-events:auto;">🏃</button>
+  <button class="ar-top-left-flee" onclick="window.PokeGameUI.fleeLiveBattle()" title="Sair da Batalha" style="pointer-events:auto;">
+    <svg viewBox="0 0 24 24" width="22" height="22" stroke="#254a52" stroke-width="2.4" fill="none"><polyline points="15 18 9 12 15 6"/></svg>
+  </button>
 
-  <!-- Botões de Combate Ao Vivo na Base da Tela (Esquivar / Orbe de Especial Carregado / Escudo Protetor) -->
+  <!-- Botoes de Combate Ao Vivo na Base da Tela (Esquivar / Orbe de Especial Carregado / Escudo Protetor) -->
   <div style="position:absolute;bottom:22px;left:0;right:0;display:flex;justify-content:center;align-items:center;gap:18px;pointer-events:auto;">
     <button onclick="window.PokeGameUI.triggerBattleDodge(-1)"
-      style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.92);border:3px solid #38bdf8;font-size:20px;font-weight:800;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.45);"
+      style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.92);border:3px solid #38bdf8;font-size:13px;font-weight:800;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;"
       title="Esquivar (Swipe ou Toque)">
-      💨
+      <svg viewBox="0 0 24 24" width="24" height="24" stroke="#0284c7" stroke-width="2.4" fill="none"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
     </button>
 
-    <!-- Orbe Central do Golpe Especial / Carregado (Enche de 0% a 100% conforme você ataca!) -->
+    <!-- Orbe Central do Golpe Especial / Carregado (Enche de 0% a 100% conforme voce ataca!) -->
     <button id="btn-live-charged" onclick="window.PokeGameUI.triggerPlayerAttack(true)"
       style="width:84px;height:84px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#ef4444);color:#ffffff;border:4px solid #ffffff;font-size:12px;font-weight:900;cursor:pointer;box-shadow:0 0 24px rgba(245,158,11,0.75);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;transition:transform 0.1s;">
-      <span style="font-size:24px;" id="lbl-charged-icon">💥</span>
+      <span id="lbl-charged-icon">
+        <svg viewBox="0 0 24 24" width="22" height="22" stroke="#ffffff" stroke-width="2.4" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      </span>
       <span id="lbl-charged-name">ESPECIAL</span>
       <span id="lbl-charged-pct" style="font-size:10px;">0%</span>
     </button>
 
-    <!-- Botão de Escudo Protetor (Protect Shield igual ao Pokémon GO!) -->
+    <!-- Botao de Escudo Protetor (Protect Shield igual ao Pokemon GO!) -->
     <button id="btn-live-shield" onclick="window.PokeGameUI.triggerBattleShield()"
-      style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.92);border:3px solid #a855f7;font-size:15px;font-weight:900;color:#6b21a8;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.45);"
+      style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.92);border:3px solid #a855f7;font-size:13px;font-weight:900;color:#6b21a8;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;gap:2px;"
       title="Ativar Escudo Protetor contra Especial">
-      🛡️2
+      <svg viewBox="0 0 24 24" width="18" height="18" stroke="#6b21a8" stroke-width="2.3" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="lbl-shield-cnt">2</span>
     </button>
   </div>
 </div>
 
-<!-- ==================== MENU RADIAL TRANSLÚCIDO VERDE-MENTA (Ref: 22.18.12 (1).jpeg) ==================== -->
+<!-- ==================== MENU RADIAL TRANSLUCIDO VERDE-MENTA (Ref: 22.18.12 (1).jpeg) ==================== -->
 <div id="pogo-radial-menu">
   <div class="radial-top-settings">
     <div class="settings-link" onclick="window.PokeGameUI.showSystemAndCrowdfundingModal()">
       <span>SETTINGS</span>
-      <div class="settings-icon-circle">⚙️</div>
+      <div class="settings-icon-circle">
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="#1c7870" stroke-width="2.2" fill="none"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </div>
     </div>
     <div class="settings-link" onclick="window.PokeGameUI.triggerAnomalyScanner()">
       <span id="radial-anomaly-lbl">ANOMALY SCANNER</span>
-      <div class="settings-icon-circle">📡</div>
+      <div class="settings-icon-circle">
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="#1c7870" stroke-width="2.2" fill="none"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><line x1="12" y1="12" x2="19" y2="5"/></svg>
+      </div>
     </div>
   </div>
 
   <div class="radial-grid">
-    <!-- Linha 1: POKÉDEX (Esquerda) e BATTLE (Direita) -->
+    <!-- Linha 1: POKEDEX (Esquerda) e BATTLE (Direita) -->
     <div class="radial-item" onclick="window.PokeGameUI.showPokedexModal(0)">
       <span class="label">POKÉDEX</span>
-      <div class="radial-circle">📱</div>
+      <div class="radial-circle">
+        <svg viewBox="0 0 24 24" width="32" height="32" stroke="#1c7c74" stroke-width="2" fill="none"><rect x="4" y="2" width="16" height="20" rx="2"/><circle cx="9" cy="7" r="2"/><line x1="8" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="16" y2="18"/></svg>
+      </div>
     </div>
     <div></div>
     <div class="radial-item" onclick="window.PokeGameUI.showBattleHubModal()">
       <span class="label">BATTLE</span>
-      <div class="radial-circle">⚔️</div>
+      <div class="radial-circle">
+        <svg viewBox="0 0 24 24" width="32" height="32" stroke="#1c7c74" stroke-width="2" fill="none"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><polygon points="12 6 15 12 12 18 9 12"/></svg>
+      </div>
     </div>
 
     <!-- Linha 2: SHOP (Centro) -->
     <div></div>
     <div class="radial-item" onclick="window.PokeGameUI.showShopModal()">
       <span class="label">SHOP</span>
-      <div class="radial-circle">🛍️</div>
+      <div class="radial-circle">
+        <svg viewBox="0 0 24 24" width="32" height="32" stroke="#1c7c74" stroke-width="2" fill="none"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+      </div>
     </div>
     <div></div>
 
-    <!-- Linha 3: POKÉMON (Esquerda) e ITEMS (Direita) -->
+    <!-- Linha 3: POKEMON (Esquerda) e ITEMS (Direita) -->
     <div class="radial-item" onclick="window.PokeGameUI.showPokemonBoxModal()">
       <span class="label">POKÉMON</span>
-      <div class="radial-circle">🐾</div>
+      <div class="radial-circle">
+        <svg viewBox="0 0 24 24" width="32" height="32" stroke="#1c7c74" stroke-width="2" fill="none"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/><circle cx="12" cy="12" r="3"/></svg>
+      </div>
     </div>
     <div></div>
     <div class="radial-item" onclick="window.PokeGameUI.showBagModal()">
       <span class="label">ITEMS</span>
-      <div class="radial-circle">🎒</div>
+      <div class="radial-circle">
+        <svg viewBox="0 0 24 24" width="32" height="32" stroke="#1c7c74" stroke-width="2" fill="none"><rect x="5" y="7" width="14" height="14" rx="3"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/><line x1="9" y1="13" x2="15" y2="13"/></svg>
+      </div>
     </div>
   </div>
 
-  <div class="pogo-close-x" onclick="window.PokeGameUI.closeRadialMenu()">✕</div>
+  <div class="pogo-close-x" onclick="window.PokeGameUI.closeRadialMenu()">X</div>
 </div>
 
-<!-- ==================== TELA INICIAL & CRIAÇÃO DE PERSONAGEM ==================== -->
+<!-- ==================== TELA INICIAL & CRIACAO DE PERSONAGEM ==================== -->
 <div id="onboarding-screen">
   <div class="onboarding-card">
     <img src="assets/logo.svg" alt="PokeASCII 3D Logo"/>
     <h2 style="color:#1c7c74;margin-bottom:4px;">POKEASCII GO 3D</h2>
     <p style="font-size:12px;color:#5a8288;margin-bottom:12px;">
-      Mapa GPS Real • 1.025 Pokémons em ASCII 3D • 100% Gratuito & Open-Source
+      Mapa GPS Real • 1.025 Pokemons em ASCII 3D • 100% Gratuito & Open-Source
     </p>
 
     <div class="form-group">
@@ -621,8 +653,8 @@
     <div class="form-group">
       <label>PERSONAGEM (HOMEM / MULHER):</label>
       <select id="inp-gender">
-        <option value="M">♂ Treinador (Masculino)</option>
-        <option value="F">♀ Treinadora (Feminino)</option>
+        <option value="M">[M] Treinador (Masculino)</option>
+        <option value="F">[F] Treinadora (Feminino)</option>
       </select>
     </div>
 
@@ -639,7 +671,7 @@
       <div class="form-group">
         <label>COR DO TRAJE:</label>
         <select id="inp-outfit">
-          <option value="#ff7f7f">Salmão GO</option>
+          <option value="#ff7f7f">Salmao GO</option>
           <option value="#2088ff">Azul Liga</option>
           <option value="#26ccaa">Verde Menta</option>
           <option value="#f0b820">Dourado Raio</option>
@@ -651,20 +683,20 @@
     <div class="form-group">
       <label>EQUIPE:</label>
       <select id="inp-team">
-        <option value="Trovão">⚡ Equipe Trovão (Instinto)</option>
-        <option value="Chama">🔥 Equipe Chama (Valor)</option>
-        <option value="Maré">💧 Equipe Maré (Sabedoria)</option>
+        <option value="Trovão">[INSTINCT] Equipe Trovao (Spark)</option>
+        <option value="Chama">[VALOR] Equipe Chama (Candela)</option>
+        <option value="Maré">[MYSTIC] Equipe Mare (Blanche)</option>
       </select>
     </div>
 
     <button class="pogo-pill-btn" style="width:100%;margin-top:12px;"
       onclick="window.PokeGameUI.finishCharacterCreation()">
-      COMEÇAR AVENTURA NO MAPA!
+      COMECAR AVENTURA NO MAPA!
     </button>
   </div>
 </div>
 
-<!-- ==================== MODAL UNIVERSAL CLARO POKÉMON GO ==================== -->
+<!-- ==================== MODAL UNIVERSAL CLARO POKEMON GO ==================== -->
 <div id="game-modal">
   <div class="modal-window">
     <div class="modal-header">
@@ -672,7 +704,7 @@
     </div>
     <div id="modal-body"></div>
     <div class="modal-footer-x">
-      <div class="pogo-close-x" onclick="window.PokeGameUI.closeModal()">✕</div>
+      <div class="pogo-close-x" onclick="window.PokeGameUI.closeModal()">X</div>
     </div>
   </div>
 </div>

@@ -429,12 +429,12 @@ window.PokeStorage = (function() {
         profile.level++;
         profile.pokecoins += 25;
         profile.bag.ultra_ball = (profile.bag.ultra_ball || 0) + 3;
-        showToast(`🎉 LEVEL UP! Você alcançou o Nível ${profile.level} (+25 PokéCoins + 3 Ultra Balls)!`, "success");
+        showToast(`[LEVEL UP] Voce alcancou o Nivel ${profile.level} (+25 PokeCoins + 3 Ultra Balls)!`, "success");
       } else {
         profile.prestigeRank++;
         profile.pokecoins += 50;
         profile.stardust += 2000;
-        showToast(`👑 PRESTÍGIO INFINITO #${profile.prestigeRank}! (+50 PokéCoins + 2.000 Stardust)!`, "success");
+        showToast(`[PRESTIGIO #${profile.prestigeRank}] (+50 PokeCoins + 2.000 Stardust)!`, "success");
       }
     }
     save();
@@ -450,19 +450,19 @@ window.PokeStorage = (function() {
     a.download = `pokeascii_save_${profile.trainerName}_${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast("💾 Arquivo de Save exportado com sucesso!", "success");
+    showToast("[SAVE] Arquivo de Save exportado com sucesso!", "success");
   }
 
   function importSaveJson(jsonStr) {
     try {
       const parsed = JSON.parse(jsonStr);
-      if (!parsed || !parsed.pokemonBox) throw new Error("Formato inválido");
+      if (!parsed || !parsed.pokemonBox) throw new Error("Formato invalido");
       profile = Object.assign(createDefaultProfile(), parsed);
       save();
-      showToast("✅ Progresso restaurado com sucesso!", "success");
+      showToast("[OK] Progresso restaurado com sucesso!", "success");
       return true;
     } catch (e) {
-      showToast("❌ Erro ao importar save: " + e.message, "error");
+      showToast("[ERRO] Falha ao importar save: " + e.message, "error");
       return false;
     }
   }

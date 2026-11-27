@@ -59,14 +59,14 @@
 
 <div class="header">
   <div>
-    <h2>⚙️ PAINEL DE ADMINISTRAÇÃO & BALANCEAMENTO — POKEASCII GO 3D</h2>
+    <h2>️ PAINEL DE ADMINISTRAÇÃO & BALANCEAMENTO — POKEASCII GO 3D</h2>
     <small style="color:#9ad8c4">Ajuste pesos de spawn, probabilidades de captura, IVs, economia, limite de nível e visualize reportes de bugs em tempo real.</small>
   </div>
   <div>
-    <button onclick="window.location.href='index.html'">🎮 Voltar ao Jogo</button>
-    <button onclick="saveAllBalance()">💾 Salvar & Aplicar no Jogo</button>
-    <button class="warn" onclick="exportBalanceJson()">⬇️ Exportar JSON</button>
-    <button class="danger" onclick="resetDefaults()">🔄 Restaurar Padrões</button>
+    <button onclick="window.location.href='index.html'"> Voltar ao Jogo</button>
+    <button onclick="saveAllBalance()"> Salvar & Aplicar no Jogo</button>
+    <button class="warn" onclick="exportBalanceJson()">️ Exportar JSON</button>
+    <button class="danger" onclick="resetDefaults()"> Restaurar Padrões</button>
   </div>
 </div>
 
@@ -75,7 +75,7 @@
 <div class="grid">
   <!-- 1. Spawns, Pokédex & Raridade -->
   <div class="panel">
-    <h3>🌍 1. Spawns, Pokédex Nacional & Shiny</h3>
+    <h3> 1. Spawns, Pokédex Nacional & Shiny</h3>
     <div class="field">
       <label><span>Limite Ativo da Pokédex (151 a 1025):</span></label>
       <input type="number" id="cfg-activeDexLimit" min="151" max="1025" step="1"/>
@@ -100,7 +100,7 @@
 
   <!-- 2. Taxas de Captura & Mecânica Curveball -->
   <div class="panel">
-    <h3>🔴 2. Física de Captura & Bônus Curveball</h3>
+    <h3> 2. Física de Captura & Bônus Curveball</h3>
     <div class="field">
       <label><span>Multiplicador Global de Taxa de Captura:</span></label>
       <input type="number" id="cfg-catchRateMultiplier" min="0.2" max="5.0" step="0.05"/>
@@ -125,7 +125,7 @@
 
   <!-- 3. Economia, Passe de Batalha & Limites Anti-Quebra -->
   <div class="panel">
-    <h3>✨ 3. Economia, Passe Grátis & Limite Anti-Quebra</h3>
+    <h3> 3. Economia, Passe Grátis & Limite Anti-Quebra</h3>
     <div class="field">
       <label><span>Multiplicador de XP Global:</span></label>
       <input type="number" id="cfg-xpMultiplier" min="0.5" max="10" step="0.25"/>
@@ -158,8 +158,8 @@
 
   <!-- 4. Relatórios de Bugs Enviados pelos Usuários em 2 Cliques -->
   <div class="panel">
-    <h3>🐞 4. Central de Bugs & Telemetria dos Jogadores</h3>
-    <button class="danger" onclick="clearBugReports()">🗑️ Limpar Relatórios</button>
+    <h3> 4. Central de Bugs & Telemetria dos Jogadores</h3>
+    <button class="danger" onclick="clearBugReports()">️ Limpar Relatórios</button>
     <div id="bug-list-box" style="max-height:260px;overflow-y:auto;margin-top:8px;"></div>
   </div>
 </div>
@@ -190,13 +190,13 @@ function saveAllBalance() {
     if (el) next[k] = Number(el.value);
   }
   window.PokeBalance.save(next);
-  document.getElementById("status-msg").textContent = "✅ Balanceamento salvo e aplicado imediatamente em todas as sessões!";
+  document.getElementById("status-msg").textContent = " Balanceamento salvo e aplicado imediatamente em todas as sessões!";
 }
 
 function resetDefaults() {
   window.PokeBalance.reset();
   loadForm();
-  document.getElementById("status-msg").textContent = "🔄 Valores padrões oficiais restaurados!";
+  document.getElementById("status-msg").textContent = " Valores padrões oficiais restaurados!";
 }
 
 function exportBalanceJson() {

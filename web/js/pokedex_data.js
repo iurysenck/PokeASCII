@@ -109,26 +109,30 @@ window.PokeData = (function() {
     XScissor:     { name: "X-Scissor",    type: "Bug",      power: 55,  energyCost: 35 }
   };
 
-  // Catálogo Completo de Itens do Pokémon GO (100% Conquistáveis Jogando, Zero Gacha)
+  // Gerador de Icones Vetoriais SVG para Itens e Medalhas (Zero Emojis!)
+  function itemSvg(color, innerPath) {
+    return `<svg class="pogo-ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;">${innerPath}</svg>`;
+  }
+
   const ITEMS_CATALOG = {
-    poke_ball:       { id: "poke_ball",       name: "Poké Ball",        cat: "ball",  catchMult: 1.0,  icon: "🔴", desc: "Cápsula padrão para capturar Pokémons selvagens (1.0x)." },
-    great_ball:      { id: "great_ball",      name: "Great Ball",       cat: "ball",  catchMult: 1.5,  icon: "🔵", desc: "Cápsula de alta performance com +50% de taxa de captura (1.5x)." },
-    ultra_ball:      { id: "ultra_ball",      name: "Ultra Ball",       cat: "ball",  catchMult: 2.0,  icon: "🟡", desc: "Cápsula avançada que dobra a chance de captura (2.0x)." },
-    master_ball:     { id: "master_ball",     name: "Master Ball",      cat: "ball",  catchMult: 99.0, icon: "🟣", desc: "Captura qualquer Pokémon sem falhar (100% garantido)." },
-    razz_berry:      { id: "razz_berry",      name: "Razz Berry",       cat: "berry", catchMult: 1.5,  candyMult: 1, calm: false, icon: "🍓", desc: "Acalma o Pokémon aumentando a chance de captura em 1.5x." },
-    nanab_berry:     { id: "nanab_berry",     name: "Nanab Berry",      cat: "berry", catchMult: 1.15, candyMult: 1, calm: true,  icon: "🍌", desc: "Deixa o Pokémon imóvel na câmera AR para facilitar o tiro Excellent." },
-    pinap_berry:     { id: "pinap_berry",     name: "Pinap Berry",      cat: "berry", catchMult: 1.0,  candyMult: 2, calm: false, icon: "🍍", desc: "Dobra a quantidade de Candies recebidos ao capturar o Pokémon (2x)." },
-    golden_razz:     { id: "golden_razz",     name: "Golden Razz Berry",cat: "berry", catchMult: 2.5,  candyMult: 1, calm: true,  icon: "✨", desc: "Aumenta drasticamente a chance de captura (2.5x) e acalma o alvo." },
-    potion:          { id: "potion",          name: "Potion",           cat: "heal",  healHp: 50,      icon: "🧪", desc: "Restaura 50 HP de um Pokémon após batalhas de Ginásio/Raid." },
-    hyper_potion:    { id: "hyper_potion",    name: "Hyper Potion",     cat: "heal",  healHp: 200,     icon: "⚗️", desc: "Restaura 200 HP de um Pokémon ferido." },
-    max_revive:      { id: "max_revive",      name: "Max Revive",       cat: "heal",  healHp: 9999,    icon: "💎", desc: "Revive e restaura 100% do HP de um Pokémon desmaiado." },
-    incense:         { id: "incense",         name: "Incense (30m)",    cat: "boost", durationSec: 1800, icon: "🌸", desc: "Atrai Pokémons selvagens com 3x mais frequência para a sua posição." },
-    lucky_egg:       { id: "lucky_egg",       name: "Lucky Egg (30m)",  cat: "boost", durationSec: 1800, icon: "🥚", desc: "Dobra todo o XP ganho durante 30 minutos (2x XP)." },
-    star_piece:      { id: "star_piece",      name: "Star Piece (30m)", cat: "boost", durationSec: 1800, icon: "⭐", desc: "Aumenta o Stardust recebido em +50% durante 30 minutos." },
-    rare_candy:      { id: "rare_candy",      name: "Rare Candy",       cat: "evo",   icon: "🍬", desc: "Converte-se em +5 Candies de qualquer Pokémon selecionado." },
-    evo_stone:       { id: "evo_stone",       name: "Evolution Stone",  cat: "evo",   icon: "🔮", desc: "Pedra elemental ancestral usada para evoluções especiais." },
-    charged_tm:      { id: "charged_tm",      name: "Charged TM",       cat: "tm",    icon: "💿", desc: "Ensina um novo Golpe Carregado de elite ao seu Pokémon." },
-    raid_pass:       { id: "raid_pass",       name: "Raid Pass",        cat: "raid",  icon: "🎫", desc: "Permite desafiar um Boss Gigante de Raid 5 Estrelas." }
+    poke_ball:       { id: "poke_ball",       name: "Poke Ball",        cat: "ball",  catchMult: 1.0,  icon: itemSvg("#ef4444", "<circle cx='12' cy='12' r='9'/><line x1='3' y1='12' x2='21' y2='12'/><circle cx='12' cy='12' r='3' fill='#fff'/>"), desc: "Capsula padrao para capturar Pokemons selvagens (1.0x)." },
+    great_ball:      { id: "great_ball",      name: "Great Ball",       cat: "ball",  catchMult: 1.5,  icon: itemSvg("#2563eb", "<circle cx='12' cy='12' r='9'/><line x1='3' y1='12' x2='21' y2='12'/><circle cx='12' cy='12' r='3' fill='#fff'/>"), desc: "Capsula de alta performance com +50% de taxa de captura (1.5x)." },
+    ultra_ball:      { id: "ultra_ball",      name: "Ultra Ball",       cat: "ball",  catchMult: 2.0,  icon: itemSvg("#d97706", "<circle cx='12' cy='12' r='9'/><line x1='3' y1='12' x2='21' y2='12'/><circle cx='12' cy='12' r='3' fill='#fff'/>"), desc: "Capsula avancada que dobra a chance de captura (2.0x)." },
+    master_ball:     { id: "master_ball",     name: "Master Ball",      cat: "ball",  catchMult: 99.0, icon: itemSvg("#9333ea", "<circle cx='12' cy='12' r='9'/><line x1='3' y1='12' x2='21' y2='12'/><circle cx='12' cy='12' r='3' fill='#fff'/>"), desc: "Captura qualquer Pokemon sem falhar (100% garantido)." },
+    razz_berry:      { id: "razz_berry",      name: "Razz Berry",       cat: "berry", catchMult: 1.5,  candyMult: 1, calm: false, icon: itemSvg("#e11d48", "<path d='M12 5c-4 0-7 3-7 8 0 4 3 7 7 7s7-3 7-7c0-5-3-8-7-8z'/><path d='M12 2v3'/>"), desc: "Acalma o Pokemon aumentando a chance de captura em 1.5x." },
+    nanab_berry:     { id: "nanab_berry",     name: "Nanab Berry",      cat: "berry", catchMult: 1.15, candyMult: 1, calm: true,  icon: itemSvg("#f59e0b", "<path d='M7 17c4 2 9-2 11-9-3 0-8 3-11 9z'/>"), desc: "Deixa o Pokemon imovel na camera AR para facilitar o tiro Excellent." },
+    pinap_berry:     { id: "pinap_berry",     name: "Pinap Berry",      cat: "berry", catchMult: 1.0,  candyMult: 2, calm: false, icon: itemSvg("#eab308", "<ellipse cx='12' cy='14' rx='6' ry='7'/><path d='M9 7l3-4 3 4'/>"), desc: "Dobra a quantidade de Candies recebidos ao capturar o Pokemon (2x)." },
+    golden_razz:     { id: "golden_razz",     name: "Golden Razz Berry",cat: "berry", catchMult: 2.5,  candyMult: 1, calm: true,  icon: itemSvg("#f59e0b", "<polygon points='12 2 15 9 22 9 16 14 18 21 12 17 6 21 8 14 2 9 9 9'/>"), desc: "Aumenta drasticamente a chance de captura (2.5x) e acalma o alvo." },
+    potion:          { id: "potion",          name: "Potion",           cat: "heal",  healHp: 50,      icon: itemSvg("#8b5cf6", "<path d='M9 3h6v4l4 8v5H5v-5l4-8V3z'/>"), desc: "Restaura 50 HP de um Pokemon apos batalhas de Ginasio/Raid." },
+    hyper_potion:    { id: "hyper_potion",    name: "Hyper Potion",     cat: "heal",  healHp: 200,     icon: itemSvg("#ec4899", "<path d='M9 3h6v4l4 8v5H5v-5l4-8V3z'/>"), desc: "Restaura 200 HP de um Pokemon ferido." },
+    max_revive:      { id: "max_revive",      name: "Max Revive",       cat: "heal",  healHp: 9999,    icon: itemSvg("#eab308", "<polygon points='12 2 19 12 12 22 5 12'/>"), desc: "Revive e restaura 100% do HP de um Pokemon desmaiado." },
+    incense:         { id: "incense",         name: "Incense (30m)",    cat: "boost", durationSec: 1800, icon: itemSvg("#ec4899", "<circle cx='12' cy='12' r='8'/><circle cx='12' cy='12' r='4'/>"), desc: "Atrai Pokemons selvagens com 3x mais frequencia para a sua posicao." },
+    lucky_egg:       { id: "lucky_egg",       name: "Lucky Egg (30m)",  cat: "boost", durationSec: 1800, icon: itemSvg("#0ea5e9", "<ellipse cx='12' cy='13' rx='7' ry='9'/>"), desc: "Dobra todo o XP ganho durante 30 minutos (2x XP)." },
+    star_piece:      { id: "star_piece",      name: "Star Piece (30m)", cat: "boost", durationSec: 1800, icon: itemSvg("#f59e0b", "<polygon points='12 2 15 9 22 9 16 14 18 21 12 17 6 21 8 14 2 9 9 9'/>"), desc: "Aumenta o Stardust recebido em +50% durante 30 minutos." },
+    rare_candy:      { id: "rare_candy",      name: "Rare Candy",       cat: "evo",   icon: itemSvg("#3b82f6", "<circle cx='12' cy='12' r='6'/><path d='M4 8l3 4-3 4M20 8l-3 4 3 4'/>"), desc: "Converte-se em +5 Candies de qualquer Pokemon selecionado." },
+    evo_stone:       { id: "evo_stone",       name: "Evolution Stone",  cat: "evo",   icon: itemSvg("#10b981", "<polygon points='12 2 20 9 17 21 7 21 4 9'/>"), desc: "Pedra elemental ancestral usada para evolucoes especiais." },
+    charged_tm:      { id: "charged_tm",      name: "Charged TM",       cat: "tm",    icon: itemSvg("#6366f1", "<circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='3'/>"), desc: "Ensina um novo Golpe Carregado de elite ao seu Pokemon." },
+    raid_pass:       { id: "raid_pass",       name: "Raid Pass",        cat: "raid",  icon: itemSvg("#f97316", "<rect x='3' y='6' width='18' height='12' rx='2'/><line x1='15' y1='6' x2='15' y2='18'/>"), desc: "Permite desafiar um Boss Gigante de Raid 5 Estrelas." }
   };
 
   // Banco Compacto dos 151 Pokémons Clássicos de Kanto + Favoritos Gen 2..9
@@ -463,11 +467,11 @@ window.PokeData = (function() {
   function getTypeMedalInfo(profile, typeName) {
     const counts = (profile && profile.typeCounts) ? profile.typeCounts : {};
     const count = counts[typeName] || 0;
-    let tier = "Nenhuma", catchBonus = 1.0, rareWeightMult = 1.0, icon = "⚪";
-    if (count >= 100) { tier = "Platina"; catchBonus = 1.25; rareWeightMult = 1.65; icon = "💎"; }
-    else if (count >= 50) { tier = "Ouro"; catchBonus = 1.18; rareWeightMult = 1.40; icon = "🥇"; }
-    else if (count >= 20) { tier = "Prata"; catchBonus = 1.12; rareWeightMult = 1.22; icon = "🥈"; }
-    else if (count >= 5)  { tier = "Bronze"; catchBonus = 1.06; rareWeightMult = 1.10; icon = "🥉"; }
+    let tier = "Nenhuma", catchBonus = 1.0, rareWeightMult = 1.0, icon = "[ - ]";
+    if (count >= 100) { tier = "Platina"; catchBonus = 1.25; rareWeightMult = 1.65; icon = "[PLAT]"; }
+    else if (count >= 50) { tier = "Ouro"; catchBonus = 1.18; rareWeightMult = 1.40; icon = "[OURO]"; }
+    else if (count >= 20) { tier = "Prata"; catchBonus = 1.12; rareWeightMult = 1.22; icon = "[PRATA]"; }
+    else if (count >= 5)  { tier = "Bronze"; catchBonus = 1.06; rareWeightMult = 1.10; icon = "[BRONZE]"; }
     return { typeName, count, tier, catchBonus, rareWeightMult, icon };
   }
 

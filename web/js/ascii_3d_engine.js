@@ -68,9 +68,9 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
   function mat4View6DoF(pos, yaw, pitch, roll) {
     const cy = Math.cos(yaw), sy = Math.sin(yaw);
     const cp = Math.cos(pitch), sp = Math.sin(pitch);
-    const f = norm3({x: sy*cp, y: sp, z: -cy*cp});
+    const f = norm3({x: -sy*cp, y: sp, z: -cy*cp});
     const cr = Math.cos(roll), sr = Math.sin(roll);
-    const upT = norm3({x: sr*cy, y: cr, z: sr*sy});
+    const upT = norm3({x: sr*cy, y: cr, z: -sr*sy});
     const s = norm3(cross3(f, upT));
     const u = cross3(s, f);
     const m = mat4Identity();
@@ -78,6 +78,21 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     m[1]=u.x; m[5]=u.y; m[9]=u.z;   m[13]=-dot3(u, pos);
     m[2]=-f.x;m[6]=-f.y;m[10]=-f.z; m[14]=dot3(f, pos);
     return m;
+  }
+
+  // Gera a Matriz View e a Base Ortonormal (right=s, up=u, forward=f) exatamente alinhadas
+  // para que o Raycast do Chão 3D e as Malhas 3D fiquem 100% soldados no mapa ao girar/dar zoom!
+  function mat4LookAtBasis(eye, target) {
+    const f = norm3(sub3(target, eye));
+    let s = cross3(f, {x: 0, y: 1, z: 0});
+    if (Math.hypot(s.x, s.y, s.z) < 1e-5) s = {x: 1, y: 0, z: 0};
+    else s = norm3(s);
+    const u = norm3(cross3(s, f));
+    const view = mat4Identity();
+    view[0]=s.x;  view[4]=s.y;  view[8]=s.z;   view[12]=-dot3(s, eye);
+    view[1]=u.x;  view[5]=u.y;  view[9]=u.z;   view[13]=-dot3(u, eye);
+    view[2]=-f.x; view[6]=-f.y; view[10]=-f.z; view[14]=dot3(f, eye);
+    return { view, s, u, f, eye };
   }
   function mat4Perspective(fovY, aspect, zNear, zFar) {
     const f = 1.0 / Math.tan(fovY * 0.5);
@@ -295,14 +310,36 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
 
     img.onload = () => {
       try {
-        const gridW = 36, gridH = 36;
+        // 1. Recorta automaticamente as bordas transparentes do sprite 96x96 para máxima nitidez 3D!
+        const rawC = document.createElement("canvas");
+        rawC.width = img.width || 96;
+        rawC.height = img.height || 96;
+        const rawCx = rawC.getContext("2d");
+        rawCx.drawImage(img, 0, 0);
+        const rawData = rawCx.getImageData(0, 0, rawC.width, rawC.height).data;
+        let minX = rawC.width, maxX = 0, minY = rawC.height, maxY = 0;
+        for (let y = 0; y < rawC.height; ++y) {
+          for (let x = 0; x < rawC.width; ++x) {
+            if (rawData[(y * rawC.width + x) * 4 + 3] > 32) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (maxX <= minX || maxY <= minY) { minX = 0; minY = 0; maxX = rawC.width - 1; maxY = rawC.height - 1; }
+        const cropW = Math.max(8, maxX - minX + 1);
+        const cropH = Math.max(8, maxY - minY + 1);
+
+        const gridW = 42, gridH = 42;
         const c = document.createElement("canvas");
         c.width = gridW; c.height = gridH;
         const cx = c.getContext("2d");
         cx.imageSmoothingEnabled = false;
-        cx.drawImage(img, 0, 0, gridW, gridH);
+        cx.drawImage(img, minX, minY, cropW, cropH, 1, 1, gridW - 2, gridH - 2);
         const imgData = cx.getImageData(0, 0, gridW, gridH).data;
-        const volMesh = buildVolumetricMeshFromPixelGrid(gridW, gridH, imgData, 1.75, 1.85, 0.58);
+        const volMesh = buildVolumetricMeshFromPixelGrid(gridW, gridH, imgData, 1.65, 1.75, 0.62);
         if (volMesh.verts.length > 40) {
           MESH_CACHE.set(key, volMesh);
           ASCII_PORTRAIT_CACHE.delete(`${key}_0`);
@@ -320,9 +357,15 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     appendBox(m,  spreadX*0.88, headY, headZ+0.05, eyeSize*0.65, eyeSize*0.80, 0.04, eyeCol || pup, 0.25);
   }
 
-  function computeVisualScale(heightMeters) {
-    const h = Math.max(0.25, heightMeters || 1.0);
-    return Math.max(0.75, Math.min(2.25, 0.65 + 0.50 * Math.sqrt(h)));
+  function computeVisualScale(speciesIdOrHeight, scaleVariation = 1.0) {
+    let h = 1.0;
+    if (window.PokeData && Number.isInteger(speciesIdOrHeight) && speciesIdOrHeight >= 1) {
+      const sp = window.PokeData.getSpecies(speciesIdOrHeight);
+      h = (sp && sp.height_m) ? sp.height_m : 1.0;
+    } else {
+      h = Math.max(0.25, speciesIdOrHeight || 1.0);
+    }
+    return Math.max(0.72, Math.min(1.85, (0.68 + 0.42 * Math.sqrt(h)) * (scaleVariation || 1.0)));
   }
 
   function getPokemonMesh(speciesId, isShiny = false) {
@@ -609,18 +652,16 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
   }
 
   // ============================================================================
-  // GERADOR DE RETRATOS 100% ASCII 3D PARA A POKÉDEX, BOX E NEARBY!
-  // Rasteriza a malha 3D do Pokémon em um mini-G-Buffer (26x22 células ASCII)
-  // com Sobel 3D e caracteres do Nome/Tipo (ou Silhueta 3D Escura se não visto!)
+  // GERADOR DE RETRATOS 100% ASCII 3D DE ALTA DEFINIÇÃO (36x34 CÉLULAS ASCII)
+  // Usa rampa de sombreamento anatômico (@ # % * + = - : .) + Sobel 3D!
   // ============================================================================
-  function getPokemonCardImageSrc(speciesId, isShiny = false, isSilhouette = false) {
+  function getPokemonCardImageSrc(speciesId, isSilhouette = false, isShiny = false) {
     const cacheKey = `${speciesId}_${isShiny ? 1 : 0}_${isSilhouette ? 1 : 0}`;
     if (ASCII_PORTRAIT_CACHE.has(cacheKey)) return ASCII_PORTRAIT_CACHE.get(cacheKey);
 
     const mesh = getPokemonMesh(speciesId, isShiny);
-    const sp = window.PokeData.getSpecies(speciesId);
-    const gw = 24, gh = 22;
-    const cellW = 5, cellH = 6;
+    const gw = 34, gh = 32;
+    const cellW = 4, cellH = 5;
     const c = document.createElement("canvas");
     c.width = gw * cellW;
     c.height = gh * cellH;
@@ -630,13 +671,15 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     const pG = new Float32Array(gw * gh);
     const pB = new Float32Array(gw * gh);
     const pZ = new Float32Array(gw * gh);
+    const pNx = new Float32Array(gw * gh);
+    const pNy = new Float32Array(gw * gh);
     const pHit = new Uint8Array(gw * gh);
     for (let i = 0; i < gw * gh; ++i) pZ[i] = 1.0;
 
-    const view = mat4View6DoF(vec3(0, 0.95, 2.55), 0.15, -0.05, 0);
-    const proj = mat4Perspective(45 * Math.PI / 180, (gw * cellW) / (gh * cellH), 0.2, 10.0);
-    const mvp = mat4Mul(proj, view);
-    const lightDir = norm3({x: 0.35, y: 0.8, z: 0.45});
+    const basis = mat4LookAtBasis(vec3(0.32, 1.02, 2.35), vec3(0, 0.85, 0));
+    const proj = mat4Perspective(44 * Math.PI / 180, (gw * cellW) / (gh * cellH), 0.2, 10.0);
+    const mvp = mat4Mul(proj, basis.view);
+    const lightDir = norm3({x: 0.38, y: 0.78, z: 0.52});
 
     const verts = mesh.verts, indices = mesh.indices;
     for (let t = 0; t < indices.length; t += 3) {
@@ -678,7 +721,8 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
           const nx = v0.norm.x*w0 + v1.norm.x*w1 + v2.norm.x*w2;
           const ny = v0.norm.y*w0 + v1.norm.y*w1 + v2.norm.y*w2;
           const nz = v0.norm.z*w0 + v1.norm.z*w1 + v2.norm.z*w2;
-          const lit = Math.min(1.35, 0.38 + 0.72 * Math.max(0, nx*lightDir.x + ny*lightDir.y + nz*lightDir.z));
+          pNx[idx] = nx; pNy[idx] = ny;
+          const lit = Math.min(1.38, 0.42 + 0.72 * Math.max(0, nx*lightDir.x + ny*lightDir.y + nz*lightDir.z));
 
           pR[idx] = Math.min(1, (v0.col.x*w0 + v1.col.x*w1 + v2.col.x*w2) * lit);
           pG[idx] = Math.min(1, (v0.col.y*w0 + v1.col.y*w1 + v2.col.y*w2) * lit);
@@ -687,11 +731,9 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       }
     }
 
-    // Renderiza as células 3D do retrato exclusivamente com caracteres ASCII!
     ctx.font = `bold ${cellH}px 'Cascadia Mono', Consolas, monospace`;
     ctx.textBaseline = "top";
-    const nameChars = isSilhouette ? `?UNKNOWN#${sp.id}?` : `${sp.name.toUpperCase()}#@*+`;
-    let cIdx = 0;
+    const shadeRamp = ".:-=+*#%@";
 
     for (let r = 0; r < gh; ++r) {
       for (let col = 0; col < gw; ++col) {
@@ -702,17 +744,18 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
                        (r === 0 || !pHit[i-gw]) || (r === gh-1 || !pHit[i+gw]);
 
         if (isSilhouette) {
-          // Silhueta 3D Escura em ASCII para Pokémons ainda não capturados!
-          ctx.fillStyle = isEdge ? "#0f2942" : "#16324f";
+          ctx.fillStyle = isEdge ? "#0c2238" : "#153250";
           ctx.fillRect(col * cellW, r * cellH, cellW, cellH);
-          ctx.fillStyle = isEdge ? "#38bdf8" : "#4785a8";
-          ctx.fillText(isEdge ? "#" : nameChars[cIdx++ % nameChars.length], col * cellW, r * cellH);
+          ctx.fillStyle = isEdge ? "#38bdf8" : "#2563eb";
+          ctx.fillText(isEdge ? "#" : "?", col * cellW, r * cellH);
         } else {
           const cr = Math.round(pR[i]*255), cg = Math.round(pG[i]*255), cb = Math.round(pB[i]*255);
-          ctx.fillStyle = `rgb(${Math.round(cr*0.78)},${Math.round(cg*0.78)},${Math.round(cb*0.78)})`;
+          const luma = 0.299 * pR[i] + 0.587 * pG[i] + 0.114 * pB[i];
+          const ch = isEdge ? "#" : shadeRamp[Math.min(shadeRamp.length - 1, Math.floor(luma * shadeRamp.length))];
+          ctx.fillStyle = `rgb(${Math.round(cr*0.82)},${Math.round(cg*0.82)},${Math.round(cb*0.82)})`;
           ctx.fillRect(col * cellW, r * cellH, cellW, cellH);
-          ctx.fillStyle = isEdge ? "#101820" : `rgb(${Math.min(255,cr+40)},${Math.min(255,cg+40)},${Math.min(255,cb+40)})`;
-          ctx.fillText(isEdge ? "@" : nameChars[cIdx++ % nameChars.length], col * cellW, r * cellH);
+          ctx.fillStyle = isEdge ? "#0f172a" : `rgb(${Math.min(255,cr+48)},${Math.min(255,cg+48)},${Math.min(255,cb+48)})`;
+          ctx.fillText(ch, col * cellW, r * cellH);
         }
       }
     }
@@ -741,7 +784,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
       const httpsUrl = `https://${location.hostname}:8443${location.pathname}${location.search}`;
       onStatus(
-        `⚠️ iPhone/iOS exige HTTPS para liberar a câmera! Redirecionando para ${httpsUrl}`,
+        `[HTTPS] iPhone/iOS exige HTTPS para liberar a camera! Redirecionando para ${httpsUrl}`,
         "https_required",
         httpsUrl
       );
@@ -749,7 +792,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     }
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      onStatus("⚠️ API de câmera bloqueada pelo navegador (use HTTPS ou GitHub Pages).", "error");
+      onStatus("[AVISO] API de camera bloqueada pelo navegador (use HTTPS ou GitHub Pages).", "error");
       return false;
     }
 
@@ -778,7 +821,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     }
 
     if (!stream) {
-      onStatus("❌ Não foi possível abrir a câmera: " + (lastErr ? lastErr.message : "Permissão negada"), "error");
+      onStatus("[ERRO] Nao foi possivel abrir a camera: " + (lastErr ? lastErr.message : "Permissao negada"), "error");
       return false;
     }
 
@@ -787,7 +830,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       await videoEl.play();
     } catch (_) {}
 
-    onStatus("📷 Câmera Ao Vivo em Alta Definição ASCII ativada!", "ok");
+    onStatus("[AR+] Camera Ao Vivo em Alta Definicao ASCII ativada!", "ok");
     return true;
   }
 
@@ -796,7 +839,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     RAMP_STD,
     vec3, add3, sub3, mul3, dot3, cross3, norm3,
     mat4Identity, mat4Mul, mat4Vec4, mat4Translation, mat4Scale, mat4RotX, mat4RotY, mat4RotZ,
-    mat4View6DoF, mat4Perspective, projectPoint3D,
+    mat4View6DoF, mat4LookAtBasis, mat4Perspective, projectPoint3D,
     computeVisualScale,
     getPokemonMesh,
     buildPokeballMesh,
