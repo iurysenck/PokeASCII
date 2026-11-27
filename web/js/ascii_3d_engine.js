@@ -396,13 +396,41 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
 
   // ============================================================================
   // CARREGADOR E PARSER BINÁRIO DE MODELOS 3D REAIS (.GLB / glTF 2.0)
-  // Extrai milhares de triângulos 3D reais, normais, coordenadas UV e texturas
-  // PNG embutidas diretamente para o G-Buffer 100% ASCII!
+  // Processa Hierarquia de Nós glTF 2.0, Skinning Esquelético (JOINTS_0/WEIGHTS_0 + IBM),
+  // Recorte Alfa (Iris/Olhos/Chamas) e Restauração de Vibrância Toon 3DS para o G-Buffer ASCII!
   // ============================================================================
-  async function decodeGlbImageToTextureBuffer(pngBytes, mimeType) {
+  function mat4FromTRS(t, r, sc) {
+    const x = r ? r[0] : 0, y = r ? r[1] : 0, z = r ? r[2] : 0, w = r ? r[3] : 1;
+    const x2 = x + x, y2 = y + y, z2 = z + z;
+    const xx = x * x2, xy = x * y2, xz = x * z2;
+    const yy = y * y2, yz = y * z2, zz = z * z2;
+    const wx = w * x2, wy = w * y2, wz = w * z2;
+    const sx = sc ? sc[0] : 1, sy = sc ? sc[1] : 1, sz = sc ? sc[2] : 1;
+    const out = new Float32Array(16);
+    out[0] = (1 - (yy + zz)) * sx;
+    out[1] = (xy + wz) * sx;
+    out[2] = (xz - wy) * sx;
+    out[3] = 0;
+    out[4] = (xy - wz) * sy;
+    out[5] = (1 - (xx + zz)) * sy;
+    out[6] = (yz + wx) * sy;
+    out[7] = 0;
+    out[8] = (xz + wy) * sz;
+    out[9] = (yz - wx) * sz;
+    out[10] = (1 - (xx + yy)) * sz;
+    out[11] = 0;
+    out[12] = t ? t[0] : 0;
+    out[13] = t ? t[1] : 0;
+    out[14] = t ? t[2] : 0;
+    out[15] = 1;
+    return out;
+  }
+
+  async function decodeGlbImageToTextureBuffer(pngBytes, mimeType, imgName = "") {
     const texW = 128, texH = 128;
+    const isPngGrayscale = pngBytes.length > 26 && pngBytes[0] === 0x89 && pngBytes[1] === 0x50 && (pngBytes[25] === 0 || pngBytes[25] === 4);
     const blob = new Blob([pngBytes], { type: mimeType || "image/png" });
-    let c = document.createElement("canvas");
+    const c = document.createElement("canvas");
     c.width = texW;
     c.height = texH;
     const cx = c.getContext("2d");
@@ -430,10 +458,81 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
 
     const rgba = cx.getImageData(0, 0, texW, texH).data;
     const luma = new Float32Array(texW * texH);
-    for (let i = 0; i < texW * texH; ++i) {
+
+    // Mede saturação média para detectar texturas 3DS lineares/pastel desaturadas (pmXXXX_00)
+    let sumSat = 0, sumLuma = 0, opaqueCount = 0, grayDiffSum = 0;
+    for (let i = 0; i < texW * texH; i += 4) {
+      const a = rgba[i * 4 + 3];
+      if (a < 64) continue;
       const r = rgba[i * 4 + 0] / 255;
       const g = rgba[i * 4 + 1] / 255;
       const b = rgba[i * 4 + 2] / 255;
+      const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
+      const sat = maxC > 1e-4 ? (maxC - minC) / maxC : 0;
+      sumSat += sat;
+      sumLuma += 0.299 * r + 0.587 * g + 0.114 * b;
+      grayDiffSum += Math.abs(r - g) + Math.abs(g - b);
+      opaqueCount++;
+    }
+    const avgSat = opaqueCount > 0 ? sumSat / opaqueCount : 0.5;
+    const avgLuma = opaqueCount > 0 ? sumLuma / opaqueCount : 0.5;
+    const isPureGrayscaleMask = isPngGrayscale || (opaqueCount > 0 && (grayDiffSum / opaqueCount) < 0.008 && /fire|flame|sten|Image_3|Image_4/i.test(imgName));
+    // Texturas 3DS têm albedo pastel (avgSat < 0.44 e avgLuma > 0.35): restaura vibrância e contraste Toon!
+    const needs3DSVibrance = !isPureGrayscaleMask && avgSat < 0.46 && avgLuma > 0.32;
+    const satBoost = needs3DSVibrance ? Math.min(2.65, Math.max(1.55, 0.72 / Math.max(0.24, avgSat))) : 1.25;
+    const gamma = needs3DSVibrance ? 1.42 : 1.12;
+
+    for (let i = 0; i < texW * texH; ++i) {
+      const p = i * 4;
+      let r = rgba[p] / 255;
+      let g = rgba[p + 1] / 255;
+      let b = rgba[p + 2] / 255;
+      let a = rgba[p + 3];
+
+      if (isPureGrayscaleMask) {
+        // Máscara de chama 3DS em escala de cinza (ex: Charizard 6.glb cauda de fogo)
+        const mLuma = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (mLuma < 0.16) {
+          a = 0;
+        } else {
+          r = 1.0;
+          g = Math.min(1.0, 0.22 + mLuma * 0.72);
+          b = Math.min(1.0, 0.05 + mLuma * 0.25);
+          a = 255;
+        }
+      } else if (a >= 32) {
+        const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
+        const chroma = maxC - minC;
+        // Preserva o branco puro da esclera dos olhos e o preto das pupilas
+        const isNeutralWhite = minC > 0.74 && chroma < 0.09;
+        const isNeutralBlack = maxC < 0.16 && chroma < 0.06;
+
+        if (!isNeutralWhite && !isNeutralBlack) {
+          let y = 0.299 * r + 0.587 * g + 0.114 * b;
+          const yGamma = Math.pow(y, gamma);
+          const scaleY = y > 1e-4 ? (yGamma / y) : 1.0;
+          const rg = r * scaleY, gg = g * scaleY, bg = b * scaleY;
+          r = yGamma + (rg - yGamma) * satBoost;
+          g = yGamma + (gg - yGamma) * satBoost;
+          b = yGamma + (bg - yGamma) * satBoost;
+
+          // Preserva matiz (hue) ao fazer clamp para não deslocar Laranja para Amarelo
+          const mMax = Math.max(r, g, b, 1.0);
+          if (mMax > 1.0) {
+            r = yGamma + (r - yGamma) / mMax;
+            g = yGamma + (g - yGamma) / mMax;
+            b = yGamma + (b - yGamma) / mMax;
+          }
+          r = Math.max(0, Math.min(1, r));
+          g = Math.max(0, Math.min(1, g));
+          b = Math.max(0, Math.min(1, b));
+        }
+      }
+
+      rgba[p] = Math.round(r * 255);
+      rgba[p + 1] = Math.round(g * 255);
+      rgba[p + 2] = Math.round(b * 255);
+      rgba[p + 3] = a;
       luma[i] = 0.299 * r + 0.587 * g + 0.114 * b;
     }
     return { width: texW, height: texH, rgba, luma };
@@ -449,6 +548,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     const ty = Math.min(tex.height - 1, Math.max(0, Math.floor(wv * tex.height)));
     const idx = ty * tex.width + tx;
     const p = idx * 4;
+    const alpha = tex.rgba[p + 3] / 255;
 
     const txL = tx > 0 ? tx - 1 : tx;
     const txR = tx + 1 < tex.width ? tx + 1 : tx;
@@ -461,6 +561,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       r: tex.rgba[p] / 255,
       g: tex.rgba[p + 1] / 255,
       b: tex.rgba[p + 2] / 255,
+      a: alpha,
       dU,
       dV
     };
@@ -489,8 +590,8 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       const numComp = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 }[acc.type] || 1;
       const stride = bv.byteStride || 0;
       const count = acc.count;
-
       const compBytes = acc.componentType === 5126 ? 4 : (acc.componentType === 5125 ? 4 : (acc.componentType === 5123 ? 2 : 1));
+
       if (stride && stride !== numComp * compBytes) {
         const out = new Float32Array(count * numComp);
         for (let i = 0; i < count; ++i) {
@@ -506,12 +607,15 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       }
 
       const total = count * numComp;
-      let arr = null;
-      if (acc.componentType === 5126) arr = new Float32Array(arrayBuffer, byteOffset, total);
-      else if (acc.componentType === 5123) arr = new Uint16Array(arrayBuffer, byteOffset, total);
-      else if (acc.componentType === 5125) arr = new Uint32Array(arrayBuffer, byteOffset, total);
-      else if (acc.componentType === 5121) arr = new Uint8Array(arrayBuffer, byteOffset, total);
-      return arr ? { data: arr, count, numComp } : null;
+      const out = new Float32Array(total);
+      for (let i = 0; i < total; ++i) {
+        const base = byteOffset + i * compBytes;
+        if (acc.componentType === 5126) out[i] = dv.getFloat32(base, true);
+        else if (acc.componentType === 5123) out[i] = dv.getUint16(base, true);
+        else if (acc.componentType === 5125) out[i] = dv.getUint32(base, true);
+        else if (acc.componentType === 5121) out[i] = dv.getUint8(base);
+      }
+      return { data: out, count, numComp };
     }
 
     const textures = [];
@@ -522,7 +626,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
           if (img && img.bufferView !== undefined) {
             const bv = gltf.bufferViews[img.bufferView];
             const bytes = new Uint8Array(arrayBuffer, binStart + (bv.byteOffset || 0), bv.byteLength);
-            const texBuf = await decodeGlbImageToTextureBuffer(bytes, img.mimeType || "image/png");
+            const texBuf = await decodeGlbImageToTextureBuffer(bytes, img.mimeType || "image/png", img.name || `Image_${i}`);
             textures.push(texBuf);
           } else {
             textures.push(null);
@@ -533,16 +637,55 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       }
     }
 
+    // 1. Constrói a Hierarquia Completa de Nós glTF 2.0 (worldMats) e Matrizes de Skinning (skinJointMats)
+    const nodes = gltf.nodes || [];
+    const localMats = nodes.map((n) => (n.matrix ? new Float32Array(n.matrix) : mat4FromTRS(n.translation, n.rotation, n.scale)));
+    const worldMats = new Array(nodes.length);
+    const parentOf = new Array(nodes.length).fill(-1);
+    nodes.forEach((n, idx) => (n.children || []).forEach((c) => { parentOf[c] = idx; }));
+
+    function getWorldMat(idx) {
+      if (worldMats[idx]) return worldMats[idx];
+      const p = parentOf[idx];
+      worldMats[idx] = p >= 0 ? mat4Mul(getWorldMat(p), localMats[idx]) : localMats[idx];
+      return worldMats[idx];
+    }
+    for (let i = 0; i < nodes.length; ++i) getWorldMat(i);
+
+    const skinJointMats = (gltf.skins || []).map((sk) => {
+      const ibmAcc = sk.inverseBindMatrices !== undefined ? getTypedAccessor(sk.inverseBindMatrices) : null;
+      const ibmData = ibmAcc ? ibmAcc.data : null;
+      return sk.joints.map((jNodeIdx, j) => {
+        const ibm = ibmData ? ibmData.subarray(j * 16, j * 16 + 16) : mat4Identity();
+        return mat4Mul(getWorldMat(jNodeIdx), ibm);
+      });
+    });
+
+    // Lista de nós com mesh (ou fallback caso o glTF não referencie meshes em nodes)
+    const meshNodeEntries = [];
+    for (let ni = 0; ni < nodes.length; ++ni) {
+      if (nodes[ni].mesh !== undefined) {
+        meshNodeEntries.push({ nodeIdx: ni, meshIdx: nodes[ni].mesh, skinIdx: nodes[ni].skin });
+      }
+    }
+    if (meshNodeEntries.length === 0 && Array.isArray(gltf.meshes)) {
+      for (let mi = 0; mi < gltf.meshes.length; ++mi) {
+        meshNodeEntries.push({ nodeIdx: -1, meshIdx: mi, skinIdx: undefined });
+      }
+    }
+
     const rawVerts = [];
     const rawIndices = [];
     const eyeCheckIndices = [];
-    let minX = Infinity, maxX = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
-    let minZ = Infinity, maxZ = -Infinity;
 
-    for (const mesh of (gltf.meshes || [])) {
-      const mName = mesh.name || "";
+    for (const entry of meshNodeEntries) {
+      const mesh = gltf.meshes[entry.meshIdx];
+      if (!mesh) continue;
+      const mName = (mesh.name || "") + " " + (entry.nodeIdx >= 0 ? (nodes[entry.nodeIdx].name || "") : "");
       if (/vine|effect|shadow|plane|aura/i.test(mName)) continue;
+
+      const jm = entry.skinIdx !== undefined ? skinJointMats[entry.skinIdx] : null;
+      const wm = entry.nodeIdx >= 0 ? getWorldMat(entry.nodeIdx) : mat4Identity();
 
       for (const prim of (mesh.primitives || [])) {
         if (prim.mode !== undefined && prim.mode !== 4) continue;
@@ -551,11 +694,15 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
         const normAcc = getTypedAccessor(prim.attributes && prim.attributes.NORMAL);
         const uvAcc = getTypedAccessor(prim.attributes && prim.attributes.TEXCOORD_0);
         const colAcc = getTypedAccessor(prim.attributes && prim.attributes.COLOR_0);
+        const jointsAcc = jm && prim.attributes ? getTypedAccessor(prim.attributes.JOINTS_0) : null;
+        const weightsAcc = jm && prim.attributes ? getTypedAccessor(prim.attributes.WEIGHTS_0) : null;
         const idxAcc = getTypedAccessor(prim.indices);
 
         let texIdx = -1;
         let baseFactor = [1, 1, 1];
         let matName = mName;
+        let uvTransform = null;
+
         if (prim.material !== undefined && gltf.materials && gltf.materials[prim.material]) {
           const mat = gltf.materials[prim.material];
           matName += " " + (mat.name || "");
@@ -567,7 +714,15 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
           const texInfo = pbr.baseColorTexture || mat.emissiveTexture;
           if (texInfo && gltf.textures && gltf.textures[texInfo.index]) {
             const srcIdx = gltf.textures[texInfo.index].source;
-            if (srcIdx !== undefined && textures[srcIdx]) texIdx = srcIdx;
+            if (srcIdx !== undefined && textures[srcIdx]) {
+              texIdx = srcIdx;
+              if (gltf.images && gltf.images[srcIdx] && gltf.images[srcIdx].name) {
+                matName += " " + gltf.images[srcIdx].name;
+              }
+            }
+            if (texInfo.extensions && texInfo.extensions.KHR_texture_transform) {
+              uvTransform = texInfo.extensions.KHR_texture_transform;
+            }
           }
         }
         const isEyeOrFace = /eye|iris|pupil|mouth|face/i.test(matName);
@@ -578,39 +733,75 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
         const uData = uvAcc ? uvAcc.data : null;
         const cData = colAcc ? colAcc.data : null;
         const cComp = colAcc ? colAcc.numComp : 3;
+        const jData = jointsAcc ? jointsAcc.data : null;
+        const wData = weightsAcc ? weightsAcc.data : null;
 
         for (let i = 0; i < posAcc.count; ++i) {
           const px = pData[i * 3 + 0];
           const py = pData[i * 3 + 1];
           const pz = pData[i * 3 + 2];
-          if (px < minX) minX = px; if (px > maxX) maxX = px;
-          if (py < minY) minY = py; if (py > maxY) maxY = py;
-          if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
+          const lnx = nData ? nData[i * 3 + 0] : 0;
+          const lny = nData ? nData[i * 3 + 1] : 1;
+          const lnz = nData ? nData[i * 3 + 2] : 0;
 
-          const nx = nData ? nData[i * 3 + 0] : 0;
-          const ny = nData ? nData[i * 3 + 1] : 1;
-          const nz = nData ? nData[i * 3 + 2] : 0;
-          const u = uData ? uData[i * 2 + 0] : 0;
-          const v = uData ? uData[i * 2 + 1] : 0;
+          let wx = 0, wy = 0, wz = 0;
+          let nx = 0, ny = 0, nz = 0;
+
+          if (jm && jData && wData) {
+            const wSum = (wData[i * 4] + wData[i * 4 + 1] + wData[i * 4 + 2] + wData[i * 4 + 3]) || 1.0;
+            for (let k = 0; k < 4; ++k) {
+              const w = wData[i * 4 + k] / wSum;
+              if (w <= 1e-5) continue;
+              const m = jm[jData[i * 4 + k]] || wm;
+              wx += w * (m[0] * px + m[4] * py + m[8] * pz + m[12]);
+              wy += w * (m[1] * px + m[5] * py + m[9] * pz + m[13]);
+              wz += w * (m[2] * px + m[6] * py + m[10] * pz + m[14]);
+              nx += w * (m[0] * lnx + m[4] * lny + m[8] * lnz);
+              ny += w * (m[1] * lnx + m[5] * lny + m[9] * lnz);
+              nz += w * (m[2] * lnx + m[6] * lny + m[10] * lnz);
+            }
+          } else {
+            wx = wm[0] * px + wm[4] * py + wm[8] * pz + wm[12];
+            wy = wm[1] * px + wm[5] * py + wm[9] * pz + wm[13];
+            wz = wm[2] * px + wm[6] * py + wm[10] * pz + wm[14];
+            nx = wm[0] * lnx + wm[4] * lny + wm[8] * lnz;
+            ny = wm[1] * lnx + wm[5] * lny + wm[9] * lnz;
+            nz = wm[2] * lnx + wm[6] * lny + wm[10] * lnz;
+          }
+
+          let u = uData ? uData[i * 2 + 0] : 0;
+          let v = uData ? uData[i * 2 + 1] : 0;
+          if (uvTransform) {
+            const scU = uvTransform.scale ? uvTransform.scale[0] : 1;
+            const scV = uvTransform.scale ? uvTransform.scale[1] : 1;
+            const rot = uvTransform.rotation || 0;
+            const offU = uvTransform.offset ? uvTransform.offset[0] : 0;
+            const offV = uvTransform.offset ? uvTransform.offset[1] : 0;
+            const su = u * scU, sv = v * scV;
+            const cr = Math.cos(rot), sr = Math.sin(rot);
+            u = cr * su + sr * sv + offU;
+            v = -sr * su + cr * sv + offV;
+          }
 
           let cr = baseFactor[0], cg = baseFactor[1], cb = baseFactor[2];
           if (texIdx >= 0 && textures[texIdx]) {
             const s = sampleGlbTexture(textures[texIdx], u, v);
-            if (s) {
+            if (s && s.a >= 0.25) {
               cr *= s.r;
               cg *= s.g;
               cb *= s.b;
             }
           } else if (cData) {
-            cr *= cData[i * cComp + 0];
-            cg *= cData[i * cComp + 1];
-            cb *= cData[i * cComp + 2];
+            const cScale = cData[0] > 1.0 ? (1 / 255) : 1.0;
+            cr *= cData[i * cComp + 0] * cScale;
+            cg *= cData[i * cComp + 1] * cScale;
+            cb *= cData[i * cComp + 2] * cScale;
           }
 
           if (isEyeOrFace) eyeCheckIndices.push(rawVerts.length);
           rawVerts.push({
-            pos: { x: px, y: py, z: pz },
-            norm: { x: nx, y: ny, z: nz },
+            pos: { x: wx, y: wy, z: wz },
+            norm: norm3({ x: nx, y: ny, z: nz }),
             u,
             v,
             texIdx,
@@ -633,48 +824,38 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
 
     if (rawVerts.length < 12 || rawIndices.length < 12) return null;
 
-    // Detecção Automática de Eixo Vertical (Y_UP vs Z_UP vs X_UP) por Simetria Bilateral + Plano dos Pés
-    const spanX = Math.max(1e-4, maxX - minX);
-    const spanY = Math.max(1e-4, maxY - minY);
-    const spanZ = Math.max(1e-4, maxZ - minZ);
-    const symX = Math.abs(minX + maxX) / spanX;
-    let axisMode = "Y_UP";
-    if (symX > 0.35) {
-      axisMode = "X_UP";
-    } else if ((minZ / spanZ) > (minY / spanY) + 0.12) {
-      axisMode = "Z_UP";
+    // 2. Verifica se a Armature tinha dupla rotação +90X (ex: Pikachu 25.glb onde Z é altura e -Y é frente)
+    let minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < rawVerts.length; ++i) {
+      const p = rawVerts[i].pos;
+      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+    }
+    if (maxY <= 0.08 && minY < -0.4 && minZ >= -0.08 && maxZ > 0.4) {
+      for (let i = 0; i < rawVerts.length; ++i) {
+        const rv = rawVerts[i];
+        const oy = rv.pos.y, oz = rv.pos.z;
+        const ony = rv.norm.y, onz = rv.norm.z;
+        rv.pos.y = oz; rv.pos.z = -oy;
+        rv.norm.y = onz; rv.norm.z = -ony;
+      }
     }
 
+    // 3. Centraliza em (X=0, Z=0), ancora os pés em Y=0 e normaliza para a escala métrica 1.78m
     let wMinX = Infinity, wMaxX = -Infinity;
     let wMinY = Infinity, wMaxY = -Infinity;
     let wMinZ = Infinity, wMaxZ = -Infinity;
-
     for (let i = 0; i < rawVerts.length; ++i) {
-      const rv = rawVerts[i];
-      const lx = rv.pos.x, ly = rv.pos.y, lz = rv.pos.z;
-      const lnx = rv.norm.x, lny = rv.norm.y, lnz = rv.norm.z;
-      let wx = lx, wy = ly, wz = lz;
-      let nx = lnx, ny = lny, nz = lnz;
-
-      if (axisMode === "X_UP") {
-        wx = ly;  wy = lx;  wz = lz;
-        nx = lny; ny = lnx; nz = lnz;
-      } else if (axisMode === "Z_UP") {
-        wx = lx;  wy = lz;  wz = -ly;
-        nx = lnx; ny = lnz; nz = -lny;
-      }
-
-      rv.pos.x = wx; rv.pos.y = wy; rv.pos.z = wz;
-      rv.norm = norm3({ x: nx, y: ny, z: nz });
-      if (wx < wMinX) wMinX = wx; if (wx > wMaxX) wMaxX = wx;
-      if (wy < wMinY) wMinY = wy; if (wy > wMaxY) wMaxY = wy;
-      if (wz < wMinZ) wMinZ = wz; if (wz > wMaxZ) wMaxZ = wz;
+      const p = rawVerts[i].pos;
+      if (p.x < wMinX) wMinX = p.x; if (p.x > wMaxX) wMaxX = p.x;
+      if (p.y < wMinY) wMinY = p.y; if (p.y > wMaxY) wMaxY = p.y;
+      if (p.z < wMinZ) wMinZ = p.z; if (p.z > wMaxZ) wMaxZ = p.z;
     }
 
     const wSpanX = Math.max(1e-4, wMaxX - wMinX);
     const wSpanY = Math.max(1e-4, wMaxY - wMinY);
     const wSpanZ = Math.max(1e-4, wMaxZ - wMinZ);
-    const normScale = 1.78 / Math.max(wSpanX * 0.92, wSpanY, wSpanZ * 0.82);
+    const normScale = 1.78 / Math.max(wSpanX * 0.88, wSpanY, wSpanZ * 0.78);
     const cx = (wMinX + wMaxX) * 0.5;
     const cz = (wMinZ + wMaxZ) * 0.5;
 
@@ -686,19 +867,27 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       rv.uv = Math.max(0, Math.min(1, rv.pos.y / 1.78));
     }
 
-    // Garante que o rosto/olhos do modelo 3D apontem sempre para +Z (em direção à câmera/jogador)
+    // 4. Alinha o vetor frontal (Olhos/Cabeça em relação ao centro) para +Z
     if (eyeCheckIndices.length > 0) {
-      let avgEyeZ = 0;
+      let avgEyeX = 0, avgEyeZ = 0;
       for (let i = 0; i < eyeCheckIndices.length; ++i) {
+        avgEyeX += rawVerts[eyeCheckIndices[i]].pos.x;
         avgEyeZ += rawVerts[eyeCheckIndices[i]].pos.z;
       }
+      avgEyeX /= eyeCheckIndices.length;
       avgEyeZ /= eyeCheckIndices.length;
-      if (avgEyeZ < -0.02) {
+      const distXZ = Math.hypot(avgEyeX, avgEyeZ);
+      if (distXZ > 0.05 && (avgEyeZ < 0.05 || Math.abs(avgEyeX) > Math.abs(avgEyeZ) * 0.65)) {
+        const yaw = -Math.atan2(avgEyeX, avgEyeZ);
+        const cY = Math.cos(yaw), sY = Math.sin(yaw);
         for (let i = 0; i < rawVerts.length; ++i) {
-          rawVerts[i].pos.z = -rawVerts[i].pos.z;
-          rawVerts[i].pos.x = -rawVerts[i].pos.x;
-          rawVerts[i].norm.z = -rawVerts[i].norm.z;
-          rawVerts[i].norm.x = -rawVerts[i].norm.x;
+          const rv = rawVerts[i];
+          const ox = rv.pos.x, oz = rv.pos.z;
+          const onx = rv.norm.x, onz = rv.norm.z;
+          rv.pos.x = ox * cY + oz * sY;
+          rv.pos.z = -ox * sY + oz * cY;
+          rv.norm.x = onx * cY + onz * sY;
+          rv.norm.z = -onx * sY + onz * cY;
         }
       }
     }
@@ -1167,22 +1356,12 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
           const z = w0*sz[0] + w1*sz[1] + w2*sz[2];
           const idx = py * gw + px;
           if (z >= pZ[idx]) continue;
-          pZ[idx] = z;
-          pHit[idx] = 1;
-
-          let nx = v0.norm.x*w0 + v1.norm.x*w1 + v2.norm.x*w2;
-          let ny = v0.norm.y*w0 + v1.norm.y*w1 + v2.norm.y*w2;
-          const nz = v0.norm.z*w0 + v1.norm.z*w1 + v2.norm.z*w2;
-
-          let cr = v0.col.x*w0 + v1.col.x*w1 + v2.col.x*w2;
-          let cg = v0.col.y*w0 + v1.col.y*w1 + v2.col.y*w2;
-          let cb = v0.col.z*w0 + v1.col.z*w1 + v2.col.z*w2;
-
           if (mesh.textures && v0.texIdx !== undefined && v0.texIdx >= 0 && mesh.textures[v0.texIdx]) {
             const tu = v0.u*w0 + v1.u*w1 + v2.u*w2;
             const tv = v0.v*w0 + v1.v*w1 + v2.v*w2;
             const s = sampleGlbTexture(mesh.textures[v0.texIdx], tu, tv);
             if (s) {
+              if (s.a < 0.35) continue;
               cr = s.r;
               cg = s.g;
               cb = s.b;
@@ -1191,12 +1370,22 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
             }
           }
 
+          pZ[idx] = z;
+          pHit[idx] = 1;
           pNx[idx] = nx; pNy[idx] = ny;
-          const lit = Math.min(1.42, 0.44 + 0.74 * Math.max(0, nx*lightDir.x + ny*lightDir.y + nz*lightDir.z));
+          const lit = Math.min(1.36, 0.44 + 0.72 * Math.max(0, nx*lightDir.x + ny*lightDir.y + nz*lightDir.z));
+          let lr = cr * lit, lg = cg * lit, lb = cb * lit;
+          const mMax = Math.max(lr, lg, lb, 1.0);
+          if (mMax > 1.0) {
+            const specAdd = (mMax - 1.0) * 0.16;
+            lr = Math.min(1, lr / mMax + specAdd);
+            lg = Math.min(1, lg / mMax + specAdd);
+            lb = Math.min(1, lb / mMax + specAdd);
+          }
 
-          pR[idx] = Math.min(1, cr * lit);
-          pG[idx] = Math.min(1, cg * lit);
-          pB[idx] = Math.min(1, cb * lit);
+          pR[idx] = lr;
+          pG[idx] = lg;
+          pB[idx] = lb;
         }
       }
     }

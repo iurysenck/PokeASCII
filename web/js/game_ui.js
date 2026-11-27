@@ -1259,6 +1259,15 @@ window.PokeGameUI = (function() {
   // ============================================================================
   // ESTÁGIO 2 DO PIPELINE 100% ASCII: RASTERIZADOR 3D G-BUFFER + SOBEL 3D
   // ============================================================================
+  let vBufCap = 8192;
+  let vBufSx = new Float32Array(vBufCap);
+  let vBufSy = new Float32Array(vBufCap);
+  let vBufSz = new Float32Array(vBufCap);
+  let vBufOk = new Uint8Array(vBufCap);
+  let vBufNx = new Float32Array(vBufCap);
+  let vBufNy = new Float32Array(vBufCap);
+  let vBufNz = new Float32Array(vBufCap);
+
   function rasterize3DScene(timeSec) {
     gbZ.fill(Infinity);
     gbId.fill(0);
@@ -1676,67 +1685,98 @@ window.PokeGameUI = (function() {
 
     for (const cmd of drawCmds) {
       const mvp = E.mat4Mul(vp, cmd.model);
+      const m = cmd.model;
       const verts = cmd.mesh.verts;
       const indices = cmd.mesh.indices;
+      const vLen = verts.length;
+
+      if (vLen > vBufCap) {
+        vBufCap = Math.max(vLen + 1024, vBufCap * 2);
+        vBufSx = new Float32Array(vBufCap);
+        vBufSy = new Float32Array(vBufCap);
+        vBufSz = new Float32Array(vBufCap);
+        vBufOk = new Uint8Array(vBufCap);
+        vBufNx = new Float32Array(vBufCap);
+        vBufNy = new Float32Array(vBufCap);
+        vBufNz = new Float32Array(vBufCap);
+      }
+
+      // 1. Transforma todos os vértices da malha uma única vez por drawCmd (4x mais rápido que por triângulo!)
+      let meshMinX = cols, meshMaxX = -1, meshMinY = rows, meshMaxY = -1, anyVisible = false;
+      for (let vi = 0; vi < vLen; ++vi) {
+        const v = verts[vi];
+        const px = v.pos.x, py = v.pos.y, pz = v.pos.z;
+        const cw = mvp[3] * px + mvp[7] * py + mvp[11] * pz + mvp[15];
+        if (cw <= 0.15) {
+          vBufOk[vi] = 0;
+          continue;
+        }
+        vBufOk[vi] = 1;
+        anyVisible = true;
+        const invW = 1.0 / cw;
+        const cx = mvp[0] * px + mvp[4] * py + mvp[8] * pz + mvp[12];
+        const cy = mvp[1] * px + mvp[5] * py + mvp[9] * pz + mvp[13];
+        const cz = mvp[2] * px + mvp[6] * py + mvp[10] * pz + mvp[14];
+        const sx = ((cx * invW) * 0.5 + 0.5) * cols;
+        const sy = ((cy * invW) * 0.5 + 0.5) * rows;
+        vBufSx[vi] = sx;
+        vBufSy[vi] = sy;
+        vBufSz[vi] = cz * invW;
+        if (sx < meshMinX) meshMinX = sx; if (sx > meshMaxX) meshMaxX = sx;
+        if (sy < meshMinY) meshMinY = sy; if (sy > meshMaxY) meshMaxY = sy;
+
+        const nm = v.norm;
+        const nwx = m[0] * nm.x + m[4] * nm.y + m[8] * nm.z;
+        const nwy = m[1] * nm.x + m[5] * nm.y + m[9] * nm.z;
+        const nwz = m[2] * nm.x + m[6] * nm.y + m[10] * nm.z;
+        const nl = Math.hypot(nwx, nwy, nwz) || 1.0;
+        vBufNx[vi] = nwx / nl;
+        vBufNy[vi] = nwy / nl;
+        vBufNz[vi] = nwz / nl;
+      }
+
+      // Frustum culling da malha inteira
+      if (!anyVisible || meshMaxX < 0 || meshMinX >= cols || meshMaxY < 0 || meshMinY >= rows) continue;
+
+      const meshTextures = cmd.mesh.textures || null;
 
       for (let t = 0; t < indices.length; t += 3) {
-        const v0 = verts[indices[t]], v1 = verts[indices[t + 1]], v2 = verts[indices[t + 2]];
-        const rawV = [v0, v1, v2];
-        const sx = [0, 0, 0], sy = [0, 0, 0], sz = [0, 0, 0];
-        const wn = [{ x: 0, y: 1, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 1, z: 0 }];
-        let behind = false;
+        const i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
+        if (!vBufOk[i0] || !vBufOk[i1] || !vBufOk[i2]) continue;
 
-        for (let k = 0; k < 3; ++k) {
-          const p = rawV[k].pos;
-          const clip = E.mat4Vec4(mvp, p.x, p.y, p.z, 1.0);
-          if (clip.w <= 0.15) { behind = true; break; }
-          const invW = 1.0 / clip.w;
-          sx[k] = ((clip.x * invW) * 0.5 + 0.5) * cols;
-          sy[k] = ((clip.y * invW) * 0.5 + 0.5) * rows;
-          sz[k] = clip.z * invW;
+        const sx0 = vBufSx[i0], sx1 = vBufSx[i1], sx2 = vBufSx[i2];
+        const sy0 = vBufSy[i0], sy1 = vBufSy[i1], sy2 = vBufSy[i2];
 
-          const nm = rawV[k].norm;
-          const nw = E.mat4Vec4(cmd.model, nm.x, nm.y, nm.z, 0.0);
-          wn[k] = E.norm3({ x: nw.x, y: nw.y, z: nw.z });
-        }
-        if (behind) continue;
+        const area = (sx2 - sx0) * (sy1 - sy0) - (sy2 - sy0) * (sx1 - sx0);
+        if (Math.abs(area) < 1e-4) continue;
 
-        const area = (sx[2] - sx[0]) * (sy[1] - sy[0]) - (sy[2] - sy[0]) * (sx[1] - sx[0]);
-        if (Math.abs(area) < 1e-5) continue;
-        const invArea = 1.0 / area;
-
-        const minX = Math.max(0, Math.floor(Math.min(sx[0], sx[1], sx[2])));
-        const maxX = Math.min(cols - 1, Math.ceil(Math.max(sx[0], sx[1], sx[2])));
-        const minY = Math.max(0, Math.floor(Math.min(sy[0], sy[1], sy[2])));
-        const maxY = Math.min(rows - 1, Math.ceil(Math.max(sy[0], sy[1], sy[2])));
+        const minX = Math.max(0, Math.floor(Math.min(sx0, sx1, sx2)));
+        const maxX = Math.min(cols - 1, Math.ceil(Math.max(sx0, sx1, sx2)));
+        const minY = Math.max(0, Math.floor(Math.min(sy0, sy1, sy2)));
+        const maxY = Math.min(rows - 1, Math.ceil(Math.max(sy0, sy1, sy2)));
         if (minX > maxX || minY > maxY) continue;
 
-        const hasGlbTex = Boolean(
-          cmd.mesh.textures &&
-          v0.texIdx !== undefined &&
-          v0.texIdx >= 0 &&
-          cmd.mesh.textures[v0.texIdx]
-        );
-        const activeTex = hasGlbTex ? cmd.mesh.textures[v0.texIdx] : null;
+        const invArea = 1.0 / area;
+        const sz0 = vBufSz[i0], sz1 = vBufSz[i1], sz2 = vBufSz[i2];
+        const v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
+        const activeTex = (meshTextures && v0.texIdx !== undefined && v0.texIdx >= 0) ? meshTextures[v0.texIdx] : null;
 
         for (let py = minY; py <= maxY; ++py) {
+          const pfy = py + 0.5;
           for (let px = minX; px <= maxX; ++px) {
-            const pfx = px + 0.5, pfy = py + 0.5;
-            const w0 = ((pfx - sx[1]) * (sy[2] - sy[1]) - (pfy - sy[1]) * (sx[2] - sx[1])) * invArea;
-            const w1 = ((pfx - sx[2]) * (sy[0] - sy[2]) - (pfy - sy[2]) * (sx[0] - sx[2])) * invArea;
+            const pfx = px + 0.5;
+            const w0 = ((pfx - sx1) * (sy2 - sy1) - (pfy - sy1) * (sx2 - sx1)) * invArea;
+            const w1 = ((pfx - sx2) * (sy0 - sy2) - (pfy - sy2) * (sx0 - sx2)) * invArea;
             const w2 = 1.0 - w0 - w1;
             if (w0 < 0 || w1 < 0 || w2 < 0) continue;
 
-            const z = w0 * sz[0] + w1 * sz[1] + w2 * sz[2];
+            const z = w0 * sz0 + w1 * sz1 + w2 * sz2;
             const idx = py * cols + px;
             if (z >= gbZ[idx]) continue;
 
-            gbZ[idx] = z;
-            gbId[idx] = cmd.id;
-
-            let nx = wn[0].x * w0 + wn[1].x * w1 + wn[2].x * w2;
-            let ny = wn[0].y * w0 + wn[1].y * w1 + wn[2].y * w2;
-            const nz = wn[0].z * w0 + wn[1].z * w1 + wn[2].z * w2;
+            let nx = vBufNx[i0] * w0 + vBufNx[i1] * w1 + vBufNx[i2] * w2;
+            let ny = vBufNy[i0] * w0 + vBufNy[i1] * w1 + vBufNy[i2] * w2;
+            const nz = vBufNz[i0] * w0 + vBufNz[i1] * w1 + vBufNz[i2] * w2;
 
             let texR = v0.col.x * w0 + v1.col.x * w1 + v2.col.x * w2;
             let texG = v0.col.y * w0 + v1.col.y * w1 + v2.col.y * w2;
@@ -1747,31 +1787,32 @@ window.PokeGameUI = (function() {
               const tv = v0.v * w0 + v1.v * w1 + v2.v * w2;
               const s = E.sampleGlbTexture(activeTex, tu, tv);
               if (s) {
+                // Alpha Cutout: descarta pixels transparentes de decals de íris/pupila/chamas
+                // para não cobrir o branco do olho com retângulos pretos!
+                if (s.a < 0.35) continue;
                 texR = s.r;
                 texG = s.g;
                 texB = s.b;
-                // Injeta micro-relevo da textura UV nas normais 3D do G-Buffer para que olhos,
-                // pupilas, boca, dentes e listras do modelo .GLB gerem vincos ASCII ultra-nitidos!
                 nx += s.dU * 2.35;
                 ny += s.dV * 2.35;
               }
             }
 
+            gbZ[idx] = z;
+            gbId[idx] = cmd.id;
             gbNx[idx] = nx; gbNy[idx] = ny; gbNz[idx] = nz;
 
             const ndotl = Math.max(0, nx * lightDir.x + ny * lightDir.y + nz * lightDir.z);
-            const hemi = 0.30 + 0.14 * (0.5 + 0.5 * ny);
-            const rim = Math.pow(1.0 - Math.min(1, Math.abs(nz)), 2.1) * 0.46;
-            const spec = Math.pow(Math.max(0, ndotl), 10.0) * 0.18;
-            gbLight[idx] = Math.min(1.52, hemi + 0.74 * ndotl + rim + spec);
+            const hemi = 0.34 + 0.14 * (0.5 + 0.5 * ny);
+            const rim = Math.pow(1.0 - Math.min(1, Math.abs(nz)), 2.2) * 0.38;
+            const spec = Math.pow(Math.max(0, ndotl), 10.0) * 0.14;
+            gbLight[idx] = Math.min(1.42, hemi + 0.72 * ndotl + rim + spec);
 
             if (cmd.tintRedLaser) {
-              // Tinta de Energia Vermelha/Laser quando o Pokémon está entrando/saindo da Pokébola
               gbColR[idx] = 1.0;
               gbColG[idx] = 0.22;
               gbColB[idx] = 0.28;
             } else if (cmd.tintEvolutionMorph) {
-              // Tinta de Silhueta Branca/Ciano Luminosa durante o Morph 3D de Evolução
               gbColR[idx] = 0.75;
               gbColG[idx] = 0.98;
               gbColB[idx] = 1.0;
@@ -1840,9 +1881,17 @@ window.PokeGameUI = (function() {
         if (id > 0) {
           // CÉLULA DE ENTIDADE 3D (Pokémon, Avatar, Pokébola, Anel de Raio 3.5m, Ginásio, PokéStop)
           const lit = gbLight[i];
-          const cr = Math.min(1, gbColR[i] * lit);
-          const cg = Math.min(1, gbColG[i] * lit);
-          const cb = Math.min(1, gbColB[i] * lit);
+          let cr = gbColR[i] * lit;
+          let cg = gbColG[i] * lit;
+          let cb = gbColB[i] * lit;
+          // Tonemapping com preservação de Matiz (evita que Laranja vire Amarelo sob luz forte!)
+          const maxC = Math.max(cr, cg, cb, 1.0);
+          if (maxC > 1.0) {
+            const spec = (maxC - 1.0) * 0.16;
+            cr = Math.min(1.0, cr / maxC + spec);
+            cg = Math.min(1.0, cg / maxC + spec);
+            cb = Math.min(1.0, cb / maxC + spec);
+          }
 
           const isOuterSilhouette =
             (c > 0 && gbId[i - 1] === 0) || (c < cols - 1 && gbId[i + 1] === 0) ||
