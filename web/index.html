@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#263878">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>PokeASCII GO 3D AR — Open-Source Edition</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="manifest" href="manifest.json">
+<style>
+  :root {
+    --pogo-dark: #254a52;
+    --pogo-teal: #1c8c82;
+    --pogo-green: #26ccaa;
+    --pogo-lime: #94eb9e;
+    --pogo-bg-mint: linear-gradient(180deg, #e8f8f5 0%, #f7fcfb 48%, #dff5ec 100%);
+    --pogo-radial-bg: linear-gradient(180deg, rgba(244, 254, 250, 0.94) 0%, rgba(198, 245, 214, 0.97) 100%);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #1c2b5e; color: var(--pogo-dark);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    touch-action: none;
+  }
+
+  /* Vídeo ativo na árvore DOM para compatibilidade total com WebKit no Chrome/Safari do iPhone */
+  #cam-video {
+    position: fixed; top: 0; left: 0;
+    width: 2px; height: 2px;
+    opacity: 0.01; pointer-events: none; z-index: -1;
+  }
+
+  #ascii-canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%; display: block;
+  }
+
+  /* ============================================================================
+     HUD MOBILE MINIMALISTA IDÊNTICO AO POKÉMON GO (Ref: 22.18.13 (2).jpeg)
+     90% da tela totalmente limpa!
+     ============================================================================ */
+
+  /* Pílula discreta de localização GPS no topo-esquerdo */
+  #gps-pill {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(18, 30, 68, 0.72); color: #e6f7ff;
+    border: 1px solid rgba(120, 220, 255, 0.45);
+    border-radius: 20px; padding: 5px 12px; font-size: 11px; font-weight: 700;
+    backdrop-filter: blur(6px); z-index: 12; cursor: pointer;
+    max-width: 62vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* Botões circulares flutuantes no topo-direito (Bússola/Câmera/Zoom) */
+  #right-floating-tools {
+    position: absolute; top: 12px; right: 12px;
+    display: flex; flex-direction: column; gap: 10px; align-items: center;
+    z-index: 12;
+  }
+  .circle-tool-btn {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.88); color: #254a52;
+    border: 2px solid rgba(38, 204, 170, 0.7);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 800; cursor: pointer;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.32);
+    transition: transform 0.12s;
+  }
+  .circle-tool-btn:active { transform: scale(0.90); }
+
+  /* Joystick Virtual Translúcido e Compacto (Canto inferior esquerdo, acima do retrato) */
+  #joystick-zone {
+    position: absolute; bottom: 112px; left: 16px;
+    width: 74px; height: 74px;
+    background: rgba(255, 255, 255, 0.16);
+    border: 2px solid rgba(255, 255, 255, 0.45);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 12; touch-action: none;
+    backdrop-filter: blur(2px);
+  }
+  #joystick-knob {
+    width: 30px; height: 30px;
+    background: rgba(255, 255, 255, 0.85);
+    border: 2px solid #26ccaa; border-radius: 50%;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+    pointer-events: none;
+  }
+
+  /* Canto Inferior Esquerdo: Retrato do Treinador + Nível + Parceiro (Ref: 22.18.13 (2).jpeg) */
+  #trainer-corner {
+    position: absolute; bottom: 14px; left: 12px;
+    display: flex; align-items: flex-end; gap: 6px;
+    z-index: 14; cursor: pointer;
+  }
+  .avatar-bubble {
+    width: 58px; height: 58px; border-radius: 50%;
+    background: linear-gradient(135deg, #3c68b8, #1e3264);
+    border: 3px solid #ffffff;
+    display: flex; align-items: center; justify-content: center;
+    position: relative; box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+    font-size: 28px;
+  }
+  .level-badge {
+    position: absolute; bottom: -4px; left: -4px;
+    background: #142244; color: #ffffff;
+    border: 1.5px solid #26ccaa; border-radius: 10px;
+    padding: 1px 6px; font-size: 13px; font-weight: 800;
+  }
+  .buddy-bubble {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(20, 38, 76, 0.9);
+    border: 2px solid #26ccaa;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden; box-shadow: 0 3px 8px rgba(0,0,0,0.4);
+  }
+  .buddy-bubble img { width: 36px; height: 36px; object-fit: contain; }
+  .trainer-name-label {
+    position: absolute; bottom: -16px; left: 2px;
+    color: #ffffff; font-size: 11px; font-weight: 700;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.85);
+    white-space: nowrap;
+  }
+
+  /* Centro Inferior: Botão Único da Pokébola (Abre o Menu Radial ou Lança na Câmera AR) */
+  #center-pokeball-btn {
+    position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+    width: 60px; height: 60px; border-radius: 50%;
+    background: linear-gradient(180deg, #ff3b3b 0%, #e01b1b 47%, #1e293b 48%, #1e293b 53%, #ffffff 54%, #e2e8f0 100%);
+    border: 3px solid #ffffff;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.55);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 15; cursor: pointer; transition: transform 0.12s;
+  }
+  #center-pokeball-btn::after {
+    content: ""; width: 18px; height: 18px; border-radius: 50%;
+    background: #ffffff; border: 3px solid #1e293b;
+  }
+  #center-pokeball-btn:active { transform: translateX(-50%) scale(0.91); }
+
+  /* Canto Inferior Direito: Botão Laranja Binóculos (Research/GO Pass) + Pílula Branca Nearby (3 Silhuetas) */
+  #right-bottom-corner {
+    position: absolute; bottom: 16px; right: 12px;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+    z-index: 14;
+  }
+  #research-binoculars-btn {
+    width: 46px; height: 46px; border-radius: 50%;
+    background: linear-gradient(135deg, #ffb347, #f58529);
+    border: 2.5px solid #ffffff; color: #ffffff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 21px; cursor: pointer; position: relative;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+  }
+  .notif-dot {
+    position: absolute; top: -2px; right: -2px;
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #ff5e8e; border: 2px solid #ffffff;
+  }
+  #nearby-pill {
+    background: rgba(242, 250, 248, 0.95);
+    border-radius: 22px; padding: 4px 10px;
+    display: flex; align-items: center; gap: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+    cursor: pointer; min-width: 96px; height: 38px; justify-content: center;
+  }
+  #nearby-pill img { width: 28px; height: 28px; object-fit: contain; }
+
+  /* Barra de Controles do Modo Encontro de Captura AR (Só aparece durante a captura!) */
+  #ar-encounter-hud {
+    position: absolute; inset: 0; pointer-events: none;
+    display: none; z-index: 16;
+  }
+  .ar-top-left-flee {
+    position: absolute; top: 14px; left: 14px; pointer-events: auto;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.9); color: #254a52;
+    border: none; font-size: 20px; font-weight: bold; cursor: pointer;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+  }
+  .ar-top-right-cam {
+    position: absolute; top: 14px; right: 14px; pointer-events: auto;
+    background: rgba(255, 255, 255, 0.92); color: #254a52;
+    border: 2px solid #26ccaa; border-radius: 20px;
+    padding: 7px 14px; font-size: 12px; font-weight: 800; cursor: pointer;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+  }
+  .ar-bottom-left-berry {
+    position: absolute; bottom: 24px; left: 20px; pointer-events: auto;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.92); border: 2.5px solid #ff758f;
+    font-size: 24px; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .ar-bottom-right-ball {
+    position: absolute; bottom: 24px; right: 20px; pointer-events: auto;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.92); border: 2.5px solid #3b82f6;
+    font-size: 22px; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+
+  /* ============================================================================
+     MENU RADIAL TRANSLÚCIDO VERDE-MENTA DO POKÉMON GO (Ref: 22.18.12 (1).jpeg)
+     ============================================================================ */
+  #pogo-radial-menu {
+    position: fixed; inset: 0;
+    background: var(--pogo-radial-bg);
+    backdrop-filter: blur(10px);
+    display: none; flex-direction: column; justify-content: flex-end; align-items: center;
+    z-index: 35; padding-bottom: 24px;
+    animation: fadeIn 0.18s ease;
+  }
+  .radial-top-settings {
+    position: absolute; top: 18px; right: 18px;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 14px;
+  }
+  .settings-link {
+    display: flex; align-items: center; gap: 10px;
+    color: #1c7870; font-size: 13px; font-weight: 800; letter-spacing: 0.8px;
+    cursor: pointer;
+  }
+  .settings-icon-circle {
+    width: 38px; height: 38px; border-radius: 50%;
+    border: 2px solid #1c7870; display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  .radial-grid {
+    width: 100%; max-width: 390px;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: auto auto auto;
+    justify-items: center; align-items: center;
+    row-gap: 18px; margin-bottom: 34px;
+  }
+  .radial-item {
+    display: flex; flex-direction: column; align-items: center; gap: 7px;
+    cursor: pointer;
+  }
+  .radial-item span.label {
+    color: #1a7a72; font-size: 13px; font-weight: 800; letter-spacing: 1px;
+  }
+  .radial-circle {
+    width: 74px; height: 74px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.86);
+    border: 2.5px solid #2b8a82;
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.55), 0 6px 16px rgba(20, 90, 80, 0.18);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px; color: #1c7c74; transition: transform 0.12s;
+  }
+  .radial-item:active .radial-circle { transform: scale(0.92); }
+
+  /* Botão Circular Teal ( X ) Oficial de Fechar em todos os Menus */
+  .pogo-close-x {
+    width: 54px; height: 54px; border-radius: 50%;
+    background: #1f8a84; color: #b8f5e8;
+    border: 3px solid #b8f5e8;
+    box-shadow: 0 0 0 4px #1f8a84, 0 6px 16px rgba(0,0,0,0.28);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; font-weight: 400; cursor: pointer;
+    margin: 0 auto; flex-shrink: 0;
+  }
+  .pogo-close-x:active { transform: scale(0.92); }
+
+  /* ============================================================================
+     MODAIS CLAROS ESTILO POKÉMON GO (Refs: 22.18.09 a 22.18.13)
+     ============================================================================ */
+  #game-modal {
+    position: fixed; inset: 0;
+    background: rgba(16, 36, 48, 0.45);
+    display: none; align-items: center; justify-content: center;
+    z-index: 45;
+  }
+  #game-modal.open { display: flex; }
+  .modal-window {
+    width: 100%; height: 100%; max-width: 520px;
+    background: var(--pogo-bg-mint); color: var(--pogo-dark);
+    display: flex; flex-direction: column; overflow: hidden;
+    position: relative;
+    box-shadow: 0 0 40px rgba(0,0,0,0.45);
+    animation: slideUp 0.22s ease-out;
+  }
+  @media (min-width: 540px) {
+    .modal-window { height: 92vh; border-radius: 22px; border: 3px solid #ffffff; }
+  }
+  .modal-header {
+    padding: 16px 18px 10px;
+    text-align: center;
+    border-bottom: 1px solid rgba(37, 74, 82, 0.12);
+    background: rgba(255, 255, 255, 0.65);
+  }
+  #modal-title {
+    font-size: 17px; font-weight: 800; color: #254a52; letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  #modal-body {
+    flex: 1; overflow-y: auto; padding: 14px 14px 90px;
+  }
+  .modal-footer-x {
+    position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+    z-index: 10;
+  }
+
+  /* Barra de Busca Verde-Menta (Ref: 22.18.11 (1).jpeg) */
+  .pogo-search-bar {
+    width: 100%; padding: 11px 16px;
+    background: #e3f2e8; color: #254a52;
+    border: none; border-radius: 24px;
+    font-size: 14px; font-weight: 600; margin-bottom: 14px;
+    outline: none;
+  }
+
+  /* Grade de 3 Colunas da Pokémon Box & Nearby (Ref: 22.18.11 (1).jpeg) */
+  .pogo-3col-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 12px 8px; text-align: center;
+  }
+  .pogo-mon-cell {
+    background: rgba(255, 255, 255, 0.78);
+    border-radius: 14px; padding: 8px 4px 10px;
+    cursor: pointer; transition: transform 0.12s, box-shadow 0.12s;
+    box-shadow: 0 2px 8px rgba(30, 80, 75, 0.08);
+    position: relative;
+  }
+  .pogo-mon-cell:active { transform: scale(0.95); }
+  .pogo-mon-cell.shiny { background: linear-gradient(180deg, #fffdf0, #fff4c8); border: 1.5px solid #f5c438; }
+  .pogo-cp-top { font-size: 11px; color: #7a9a9e; font-weight: 700; }
+  .pogo-cp-top b { font-size: 18px; color: #2b4c54; font-weight: 800; }
+  .pogo-mon-img { width: 76px; height: 76px; object-fit: contain; margin: 2px auto; display: block; }
+  .pogo-mon-name { font-size: 13px; font-weight: 700; color: #2b4c54; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pogo-hp-line { width: 68%; height: 4px; background: #6ee7b7; border-radius: 2px; margin: 5px auto 0; }
+
+  /* Banners Regionais da Pokédex (Ref: 22.18.12.jpeg) */
+  .pogo-region-banner {
+    background: linear-gradient(115deg, #e5f6f8 0%, #d4f0f5 52%, #00a8e8 52.5%, #0077b6 100%);
+    border-radius: 16px; padding: 14px 16px; margin-bottom: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+    box-shadow: 0 4px 12px rgba(0, 120, 180, 0.12);
+  }
+  .pogo-region-title { font-size: 19px; font-weight: 800; color: #0e7c9e; letter-spacing: 0.8px; }
+  .pogo-region-sub { font-size: 13px; font-weight: 700; color: #19647e; margin-top: 4px; }
+
+  /* Anéis Azuis do Radar Nearby (Ref: 22.18.13 (1).jpeg) */
+  .nearby-ring-cell {
+    display: flex; flex-direction: column; align-items: center; cursor: pointer; padding: 6px;
+  }
+  .nearby-blue-disc {
+    width: 88px; height: 88px; border-radius: 50%;
+    border: 3px solid #15c6e8;
+    background: radial-gradient(circle, #009fe3 0%, #009fe3 24%, transparent 25%, transparent 36%, #00b4e6 37%, #00b4e6 58%, transparent 59%);
+    display: flex; align-items: center; justify-content: center; position: relative;
+  }
+  .nearby-blue-disc img {
+    width: 68px; height: 68px; object-fit: contain;
+    transform: translate(6px, 10px);
+    filter: drop-shadow(0 3px 5px rgba(0,0,0,0.28));
+  }
+
+  /* Botões Pílula Verde-Turquesa Oficiais do Pokémon GO */
+  .pogo-pill-btn {
+    background: linear-gradient(90deg, #98ec9f 0%, #24c8a8 100%);
+    color: #ffffff; border: none; border-radius: 26px;
+    padding: 11px 22px; font-size: 13px; font-weight: 800; letter-spacing: 0.8px;
+    text-transform: uppercase; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(36, 200, 168, 0.35);
+    transition: transform 0.12s;
+  }
+  .pogo-pill-btn:active { transform: scale(0.95); }
+  .pogo-pill-btn.secondary {
+    background: #e2f2ec; color: #1c7c74; box-shadow: none; border: 1.5px solid #24c8a8;
+  }
+
+  /* Cards Claros Internos (Ficha do Pokémon, Loja, GO Pass, Batalha) */
+  .pogo-white-card {
+    background: #ffffff; border-radius: 16px; padding: 14px;
+    margin-bottom: 12px; box-shadow: 0 3px 12px rgba(30, 80, 75, 0.08);
+  }
+  .stat-capsules-row {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid #e5f0ec; border-bottom: 1px solid #e5f0ec;
+    padding: 10px 0; margin: 12px 0; text-align: center;
+  }
+  .stat-cap-val { font-size: 15px; font-weight: 800; color: #254a52; }
+  .stat-cap-lbl { font-size: 10px; font-weight: 700; color: #7a9a9e; text-transform: uppercase; margin-top: 2px; }
+
+  /* Tela Inicial & Criador de Personagem */
+  #onboarding-screen {
+    position: fixed; inset: 0;
+    background: var(--pogo-bg-mint);
+    display: none; align-items: center; justify-content: center;
+    z-index: 60; padding: 16px;
+  }
+  .onboarding-card {
+    max-width: 420px; width: 100%;
+    background: #ffffff; border-radius: 22px;
+    padding: 22px; text-align: center;
+    box-shadow: 0 12px 36px rgba(25, 90, 80, 0.18);
+  }
+  .onboarding-card img { width: 84px; height: 84px; margin-bottom: 8px; }
+  .form-group { margin: 10px 0; text-align: left; font-size: 12px; }
+  .form-group label { display: block; margin-bottom: 4px; color: #1c7c74; font-weight: 800; }
+  .form-group input, .form-group select {
+    width: 100%; padding: 9px 12px;
+    background: #eef8f4; color: #254a52;
+    border: 1.5px solid #bce6d8; border-radius: 10px;
+    font-size: 13px; font-weight: 700;
+  }
+
+  /* Toasts */
+  #toast-container {
+    position: fixed; top: 52px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; gap: 6px;
+    z-index: 70; pointer-events: none; width: 90%; max-width: 420px;
+  }
+  .toast {
+    background: rgba(255, 255, 255, 0.96); color: #254a52;
+    border-left: 5px solid #26ccaa; border-radius: 12px;
+    padding: 10px 14px; font-size: 12px; font-weight: 800;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.28);
+  }
+  .toast-warn { border-left-color: #f59e0b; }
+
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slideUp { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+</style>
+</head>
+<body>
+
+<video id="cam-video" playsinline webkit-playsinline muted autoplay></video>
+<canvas id="ascii-canvas"></canvas>
+<div id="toast-container"></div>
+<input type="file" id="import-file-inp" accept=".json" style="display:none"/>
+
+<!-- ==================== HUD DO MAPA 3D DA CIDADE (Ref: 22.18.13 (2).jpeg) ==================== -->
+<div id="map-overworld-hud">
+  <div id="gps-pill" onclick="window.PokeGameUI.startRealGpsTracking(true)" title="Toque para atualizar seu GPS real">
+    📍 Localizando sua rua...
+  </div>
+
+  <div id="right-floating-tools">
+    <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(-1.4)" title="Aumentar Zoom (+)">＋</div>
+    <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(1.4)" title="Diminuir Zoom (-)">－</div>
+    <div class="circle-tool-btn" onclick="window.PokeGameUI.startRealGpsTracking(true)" title="Centralizar no meu GPS Real">🧭</div>
+  </div>
+
+  <div id="joystick-zone" title="Arraste para caminhar pelas ruas da sua cidade">
+    <div id="joystick-knob"></div>
+  </div>
+
+  <!-- Canto Inferior Esquerdo: Retrato do Treinador + Nível + Parceiro -->
+  <div id="trainer-corner" onclick="window.PokeGameUI.showTrainerProfileModal()">
+    <div class="avatar-bubble" id="hud-avatar-icon">
+      🧑
+      <span class="level-badge" id="hud-level-num">1</span>
+      <span class="trainer-name-label" id="hud-trainer-name">Treinador</span>
+    </div>
+    <div class="buddy-bubble" id="hud-buddy-icon"></div>
+  </div>
+
+  <!-- Centro Inferior: Botão Único da Pokébola -->
+  <div id="center-pokeball-btn" onclick="window.PokeGameUI.openRadialMenu()" title="Menu Principal"></div>
+
+  <!-- Canto Inferior Direito: Binóculos (GO Pass / Pesquisas) + Pílula Nearby (3 Silhuetas) -->
+  <div id="right-bottom-corner">
+    <div id="research-binoculars-btn" onclick="window.PokeGameUI.showBattlePassModal()" title="GO Pass & Pesquisas">
+      🔭
+      <span class="notif-dot"></span>
+    </div>
+    <div id="nearby-pill" onclick="window.PokeGameUI.showNearbyTrackerModal()" title="Pokémons e Raids Próximos"></div>
+  </div>
+</div>
+
+<!-- ==================== HUD DO ENCONTRO DE CAPTURA AR 3D ==================== -->
+<div id="ar-encounter-hud">
+  <button class="ar-top-left-flee" onclick="window.PokeGameUI.toggleSceneMode('CITY_MAP')" title="Fugir / Voltar ao Mapa">🏃</button>
+  <button class="ar-top-right-cam" id="btn-ar-cam" onclick="window.PokeGameUI.toggleRealCamera()">📷 AR+ Câmera</button>
+  <button class="ar-bottom-left-berry" onclick="window.PokeGameUI.showBagModal('berry')" title="Usar Fruta (Berry)">🍓</button>
+  <button class="ar-bottom-right-ball" onclick="window.PokeGameUI.showBagModal('ball')" title="Trocar Pokébola">🔴</button>
+</div>
+
+<!-- ==================== MENU RADIAL TRANSLÚCIDO VERDE-MENTA (Ref: 22.18.12 (1).jpeg) ==================== -->
+<div id="pogo-radial-menu">
+  <div class="radial-top-settings">
+    <div class="settings-link" onclick="window.PokeGameUI.showSystemAndCrowdfundingModal()">
+      <span>SETTINGS</span>
+      <div class="settings-icon-circle">⚙️</div>
+    </div>
+    <div class="settings-link" onclick="window.PokeGameUI.triggerAnomalyScanner()">
+      <span id="radial-anomaly-lbl">ANOMALY SCANNER</span>
+      <div class="settings-icon-circle">📡</div>
+    </div>
+  </div>
+
+  <div class="radial-grid">
+    <!-- Linha 1: POKÉDEX (Esquerda) e BATTLE (Direita) -->
+    <div class="radial-item" onclick="window.PokeGameUI.showPokedexModal(0)">
+      <span class="label">POKÉDEX</span>
+      <div class="radial-circle">📱</div>
+    </div>
+    <div></div>
+    <div class="radial-item" onclick="window.PokeGameUI.showBattleHubModal()">
+      <span class="label">BATTLE</span>
+      <div class="radial-circle">⚔️</div>
+    </div>
+
+    <!-- Linha 2: SHOP (Centro) -->
+    <div></div>
+    <div class="radial-item" onclick="window.PokeGameUI.showShopModal()">
+      <span class="label">SHOP</span>
+      <div class="radial-circle">🛍️</div>
+    </div>
+    <div></div>
+
+    <!-- Linha 3: POKÉMON (Esquerda) e ITEMS (Direita) -->
+    <div class="radial-item" onclick="window.PokeGameUI.showPokemonBoxModal()">
+      <span class="label">POKÉMON</span>
+      <div class="radial-circle">🐾</div>
+    </div>
+    <div></div>
+    <div class="radial-item" onclick="window.PokeGameUI.showBagModal()">
+      <span class="label">ITEMS</span>
+      <div class="radial-circle">🎒</div>
+    </div>
+  </div>
+
+  <div class="pogo-close-x" onclick="window.PokeGameUI.closeRadialMenu()">✕</div>
+</div>
+
+<!-- ==================== TELA INICIAL & CRIAÇÃO DE PERSONAGEM ==================== -->
+<div id="onboarding-screen">
+  <div class="onboarding-card">
+    <img src="assets/logo.svg" alt="PokeASCII 3D Logo"/>
+    <h2 style="color:#1c7c74;margin-bottom:4px;">POKEASCII GO 3D</h2>
+    <p style="font-size:12px;color:#5a8288;margin-bottom:12px;">
+      Mapa GPS Real • 1.025 Pokémons em ASCII 3D • 100% Gratuito & Open-Source
+    </p>
+
+    <div class="form-group">
+      <label>NOME DO TREINADOR (OFFLINE):</label>
+      <input type="text" id="inp-trainer-name" value="AshASCII" maxlength="18"/>
+    </div>
+
+    <div class="form-group">
+      <label>PERSONAGEM (HOMEM / MULHER):</label>
+      <select id="inp-gender">
+        <option value="M">♂ Treinador (Masculino)</option>
+        <option value="F">♀ Treinadora (Feminino)</option>
+      </select>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      <div class="form-group">
+        <label>TOM DE PELE:</label>
+        <select id="inp-skin">
+          <option value="#f5c6a5">Claro</option>
+          <option value="#d99b72">Moreno</option>
+          <option value="#8d5524">Negro</option>
+          <option value="#ffe0c8">Alabastro</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>COR DO TRAJE:</label>
+        <select id="inp-outfit">
+          <option value="#ff7f7f">Salmão GO</option>
+          <option value="#2088ff">Azul Liga</option>
+          <option value="#26ccaa">Verde Menta</option>
+          <option value="#f0b820">Dourado Raio</option>
+          <option value="#9858f0">Roxo Violeta</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>EQUIPE:</label>
+      <select id="inp-team">
+        <option value="Trovão">⚡ Equipe Trovão (Instinto)</option>
+        <option value="Chama">🔥 Equipe Chama (Valor)</option>
+        <option value="Maré">💧 Equipe Maré (Sabedoria)</option>
+      </select>
+    </div>
+
+    <button class="pogo-pill-btn" style="width:100%;margin-top:12px;"
+      onclick="window.PokeGameUI.finishCharacterCreation()">
+      COMEÇAR AVENTURA NO MAPA!
+    </button>
+  </div>
+</div>
+
+<!-- ==================== MODAL UNIVERSAL CLARO POKÉMON GO ==================== -->
+<div id="game-modal">
+  <div class="modal-window">
+    <div class="modal-header">
+      <div id="modal-title">POKÉMON</div>
+    </div>
+    <div id="modal-body"></div>
+    <div class="modal-footer-x">
+      <div class="pogo-close-x" onclick="window.PokeGameUI.closeModal()">✕</div>
+    </div>
+  </div>
+</div>
+
+<script src="js/pokedex_data.js"></script>
+<script src="js/audio_and_storage.js"></script>
+<script src="js/ascii_3d_engine.js"></script>
+<script src="js/game_ui.js"></script>
+</body>
+</html>

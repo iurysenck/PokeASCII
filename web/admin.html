@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Painel de Administração & Balanceamento — PokeASCII GO 3D</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<style>
+  :root {
+    --bg: #070d12;
+    --card: #0e1e26;
+    --accent: #28f0a0;
+    --warn: #ffd248;
+    --danger: #ff4858;
+    --text: #eafff5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    padding: 20px; line-height: 1.45;
+  }
+  .header {
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+    gap: 12px; padding-bottom: 14px; margin-bottom: 20px;
+    border-bottom: 2px solid var(--accent);
+  }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px;
+  }
+  .panel {
+    background: var(--card); border: 1px solid rgba(40, 240, 160, 0.4);
+    border-radius: 10px; padding: 16px;
+  }
+  .panel h3 { color: var(--accent); margin-bottom: 12px; font-size: 15px; }
+  .field { margin-bottom: 10px; font-size: 12px; }
+  .field label { display: flex; justify-content: space-between; margin-bottom: 4px; color: #b8f0dc; }
+  .field input {
+    width: 100%; padding: 7px 10px;
+    background: #061015; color: #fff;
+    border: 1px solid rgba(40, 240, 160, 0.45); border-radius: 6px;
+    font-family: inherit; font-size: 12px;
+  }
+  button {
+    background: #167a54; color: #fff;
+    border: 1px solid #68ffc0; border-radius: 6px;
+    padding: 8px 14px; font-family: inherit; font-size: 12px; font-weight: bold;
+    cursor: pointer; margin-right: 6px; margin-top: 6px;
+  }
+  button.warn { background: #946810; border-color: var(--warn); }
+  button.danger { background: #a82030; border-color: #ff9098; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+  th, td { border: 1px solid rgba(40, 240, 160, 0.25); padding: 6px; text-align: left; }
+  th { background: rgba(40, 240, 160, 0.14); color: var(--accent); }
+  #status-msg { color: var(--warn); font-weight: bold; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h2>⚙️ PAINEL DE ADMINISTRAÇÃO & BALANCEAMENTO — POKEASCII GO 3D</h2>
+    <small style="color:#9ad8c4">Ajuste pesos de spawn, probabilidades de captura, IVs, economia, limite de nível e visualize reportes de bugs em tempo real.</small>
+  </div>
+  <div>
+    <button onclick="window.location.href='index.html'">🎮 Voltar ao Jogo</button>
+    <button onclick="saveAllBalance()">💾 Salvar & Aplicar no Jogo</button>
+    <button class="warn" onclick="exportBalanceJson()">⬇️ Exportar JSON</button>
+    <button class="danger" onclick="resetDefaults()">🔄 Restaurar Padrões</button>
+  </div>
+</div>
+
+<div id="status-msg"></div>
+
+<div class="grid">
+  <!-- 1. Spawns, Pokédex & Raridade -->
+  <div class="panel">
+    <h3>🌍 1. Spawns, Pokédex Nacional & Shiny</h3>
+    <div class="field">
+      <label><span>Limite Ativo da Pokédex (151 a 1025):</span></label>
+      <input type="number" id="cfg-activeDexLimit" min="151" max="1025" step="1"/>
+    </div>
+    <div class="field">
+      <label><span>Multiplicador de Peso para Raros/Lendários:</span></label>
+      <input type="number" id="cfg-rareSpawnMultiplier" min="0.1" max="20" step="0.1"/>
+    </div>
+    <div class="field">
+      <label><span>Probabilidade de Shiny (0.004 = 1/250):</span></label>
+      <input type="number" id="cfg-shinyProbability" min="0.0001" max="1.0" step="0.001"/>
+    </div>
+    <div class="field">
+      <label><span>Piso Mínimo de IV Selvagem (0 a 15):</span></label>
+      <input type="number" id="cfg-wildIvFloor" min="0" max="15" step="1"/>
+    </div>
+    <div class="field">
+      <label><span>Piso Mínimo de IV em Raids 5★ / Trocas (0 a 15):</span></label>
+      <input type="number" id="cfg-raidIvFloor" min="0" max="15" step="1"/>
+    </div>
+  </div>
+
+  <!-- 2. Taxas de Captura & Mecânica Curveball -->
+  <div class="panel">
+    <h3>🔴 2. Física de Captura & Bônus Curveball</h3>
+    <div class="field">
+      <label><span>Multiplicador Global de Taxa de Captura:</span></label>
+      <input type="number" id="cfg-catchRateMultiplier" min="0.2" max="5.0" step="0.05"/>
+    </div>
+    <div class="field">
+      <label><span>Bônus de Rotação Curveball (Oficial GO = 1.70x):</span></label>
+      <input type="number" id="cfg-curveballBonusMult" min="1.0" max="3.0" step="0.05"/>
+    </div>
+    <div class="field">
+      <label><span>Bônus Anel Nice! (Oficial GO = 1.15x):</span></label>
+      <input type="number" id="cfg-niceThrowMult" min="1.0" max="2.0" step="0.05"/>
+    </div>
+    <div class="field">
+      <label><span>Bônus Anel Great! (Oficial GO = 1.50x):</span></label>
+      <input type="number" id="cfg-greatThrowMult" min="1.0" max="2.5" step="0.05"/>
+    </div>
+    <div class="field">
+      <label><span>Bônus Anel Excellent! (Oficial GO = 1.85x):</span></label>
+      <input type="number" id="cfg-excellentThrowMult" min="1.0" max="3.0" step="0.05"/>
+    </div>
+  </div>
+
+  <!-- 3. Economia, Passe de Batalha & Limites Anti-Quebra -->
+  <div class="panel">
+    <h3>✨ 3. Economia, Passe Grátis & Limite Anti-Quebra</h3>
+    <div class="field">
+      <label><span>Multiplicador de XP Global:</span></label>
+      <input type="number" id="cfg-xpMultiplier" min="0.5" max="10" step="0.25"/>
+    </div>
+    <div class="field">
+      <label><span>Multiplicador de Stardust:</span></label>
+      <input type="number" id="cfg-stardustMultiplier" min="0.5" max="10" step="0.25"/>
+    </div>
+    <div class="field">
+      <label><span>Multiplicador de Candies:</span></label>
+      <input type="number" id="cfg-candyMultiplier" min="1" max="10" step="1"/>
+    </div>
+    <div class="field">
+      <label><span>XP por Escalão do Passe de Batalha:</span></label>
+      <input type="number" id="cfg-battlePassXpPerTier" min="200" max="10000" step="100"/>
+    </div>
+    <div class="field">
+      <label><span>Limite Máximo de Nível de Combate (Hard Cap = 50):</span></label>
+      <input type="number" id="cfg-maxPokemonLevelCap" min="20" max="100" step="1"/>
+    </div>
+    <div class="field">
+      <label><span>Distância do Parceiro (Buddy) p/ 1 Candy (metros):</span></label>
+      <input type="number" id="cfg-buddyDistancePerCandyM" min="25" max="5000" step="25"/>
+    </div>
+    <div class="field">
+      <label><span>Recompensa de PokéCoins por Ginásio Vencido:</span></label>
+      <input type="number" id="cfg-gymCoinReward" min="10" max="500" step="10"/>
+    </div>
+  </div>
+
+  <!-- 4. Relatórios de Bugs Enviados pelos Usuários em 2 Cliques -->
+  <div class="panel">
+    <h3>🐞 4. Central de Bugs & Telemetria dos Jogadores</h3>
+    <button class="danger" onclick="clearBugReports()">🗑️ Limpar Relatórios</button>
+    <div id="bug-list-box" style="max-height:260px;overflow-y:auto;margin-top:8px;"></div>
+  </div>
+</div>
+
+<script src="js/pokedex_data.js"></script>
+<script src="js/audio_and_storage.js"></script>
+<script>
+const FIELDS = [
+  "activeDexLimit", "rareSpawnMultiplier", "shinyProbability", "wildIvFloor", "raidIvFloor",
+  "catchRateMultiplier", "curveballBonusMult", "niceThrowMult", "greatThrowMult", "excellentThrowMult",
+  "xpMultiplier", "stardustMultiplier", "candyMultiplier", "battlePassXpPerTier",
+  "maxPokemonLevelCap", "buddyDistancePerCandyM", "gymCoinReward"
+];
+
+function loadForm() {
+  const cfg = window.PokeBalance.load();
+  for (const k of FIELDS) {
+    const el = document.getElementById("cfg-" + k);
+    if (el && cfg[k] !== undefined) el.value = cfg[k];
+  }
+  renderBugReports();
+}
+
+function saveAllBalance() {
+  const next = {};
+  for (const k of FIELDS) {
+    const el = document.getElementById("cfg-" + k);
+    if (el) next[k] = Number(el.value);
+  }
+  window.PokeBalance.save(next);
+  document.getElementById("status-msg").textContent = "✅ Balanceamento salvo e aplicado imediatamente em todas as sessões!";
+}
+
+function resetDefaults() {
+  window.PokeBalance.reset();
+  loadForm();
+  document.getElementById("status-msg").textContent = "🔄 Valores padrões oficiais restaurados!";
+}
+
+function exportBalanceJson() {
+  saveAllBalance();
+  const blob = new Blob([JSON.stringify(window.PokeBalance.get(), null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "balance_config.json";
+  a.click();
+}
+
+function renderBugReports() {
+  const box = document.getElementById("bug-list-box");
+  const list = JSON.parse(localStorage.getItem("pokeascii_bug_reports") || "[]");
+  if (list.length === 0) {
+    box.innerHTML = `<p style="color:#88c8b8;margin-top:8px;">Nenhum erro reportado até o momento.</p>`;
+    return;
+  }
+  let html = `<table><thead><tr><th>Data</th><th>Categoria</th><th>Detalhe / Telemetria</th></tr></thead><tbody>`;
+  for (const r of list) {
+    html += `<tr>
+      <td>${(r.timestamp || "").slice(0, 19).replace("T", " ")}</td>
+      <td><b>${r.category}</b></td>
+      <td>${r.description}<br/><small style="color:#78ffd0">${r.trackingTier} • ${r.fps} FPS • HTTPS:${r.isSecureContext}</small></td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  box.innerHTML = html;
+}
+
+function clearBugReports() {
+  localStorage.removeItem("pokeascii_bug_reports");
+  renderBugReports();
+}
+
+loadForm();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+build/
+server_data/
+refs/
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+.vs/

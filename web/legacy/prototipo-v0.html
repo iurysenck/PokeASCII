@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Pokémon GO ASCII-3D AR (Universal Adaptive Engine)</title>
+<style>
+  :root {
+    --bg: #070b10;
+    --panel: rgba(10, 22, 28, 0.85);
+    --accent: #28f0a0;
+    --warn: #ffd24c;
+    --danger: #ff4a4a;
+    --text: #e6fff5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+    touch-action: none;
+  }
+  #ascii-canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+  #hud-top {
+    position: absolute; top: 8px; left: 8px; right: 8px;
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px;
+    background: var(--panel); border: 1px solid rgba(40, 240, 160, 0.4);
+    border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    backdrop-filter: blur(4px); pointer-events: auto; z-index: 10;
+  }
+  .badge {
+    padding: 2px 7px; border-radius: 4px; font-weight: bold;
+    background: rgba(40, 240, 160, 0.16); color: var(--accent);
+    border: 1px solid rgba(40, 240, 160, 0.35);
+  }
+  .badge.warn { background: rgba(255, 210, 76, 0.16); color: var(--warn); border-color: rgba(255, 210, 76, 0.4); }
+  #radar-box {
+    position: absolute; top: 62px; right: 10px;
+    width: 96px; height: 96px;
+    background: rgba(8, 20, 24, 0.82);
+    border: 1px solid var(--accent); border-radius: 50%;
+    z-index: 10; pointer-events: none;
+  }
+  #hud-bottom {
+    position: absolute; bottom: 10px; left: 8px; right: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+    background: var(--panel); border: 1px solid rgba(40, 240, 160, 0.35);
+    border-radius: 8px; padding: 8px 10px; font-size: 12px;
+    z-index: 10;
+  }
+  #status-banner {
+    color: var(--warn); font-weight: bold; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .controls-row {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;
+  }
+  button {
+    background: rgba(20, 52, 46, 0.9); color: var(--text);
+    border: 1px solid var(--accent); border-radius: 6px;
+    padding: 6px 10px; font-family: inherit; font-size: 11px; font-weight: bold;
+    cursor: pointer; transition: transform 0.08s, background 0.15s;
+  }
+  button:active { transform: scale(0.95); background: rgba(40, 240, 160, 0.3); }
+  button.primary { background: rgba(230, 45, 45, 0.88); border-color: #ff9a9a; color: #fff; }
+  video { display: none; }
+</style>
+</head>
+<body>
+
+<video id="cam-video" playsinline muted></video>
+<canvas id="ascii-canvas"></canvas>
+<canvas id="radar-box" width="96" height="96"></canvas>
+
+<div id="hud-top">
+  <div>
+    <span class="badge" id="tier-badge">Track: SobelKLT</span>
+    <span class="badge" id="gov-badge">Gov: BALANCED</span>
+    <span class="badge" id="fps-badge">60 FPS</span>
+  </div>
+  <div>
+    <span class="badge warn" id="target-badge">Mira: PIKACHU (3.4m)</span>
+    <span class="badge" id="dex-badge">Pokédex: 0</span>
+  </div>
+</div>
+
+<div id="hud-bottom">
+  <div id="status-banner">Arraste para cima na tela (ou pressione ESPAÇO) para lançar a Pokébola 3D!</div>
+  <div class="controls-row">
+    <button class="primary" id="btn-throw">🔴 LANÇAR POKÉBOLA</button>
+    <button id="btn-mode">Modo: 1:ASCII-3D</button>
+    <button id="btn-cam">📷 Câmera Real / Sim</button>
+    <button id="btn-imu">🧭 Ativar Sensores IMU</button>
+    <button id="btn-reset">🎯 Recalibrar Âncora</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ============================================================================
+// POKÉMON GO ASCII-3D AR — MOTOR ADAPTATIVO UNIVERSAL ZERO-DEPENDENCY
+// Porta direta dos Módulos 1 a 7 do C++20 (Mat4, Mesh, Sobel KLT, GBuffer 3D)
+// ============================================================================
+
+const RAMP = " .:-=+*#%@";
+const SPECIES_NAMES = ["PIKACHU", "CHARMANDER", "BULBASAUR", "GASTLY"];
+
+// Pré-alocação e estruturas Matemáticas 3D (Zero GC no loop de frame)
+function vec3(x=0, y=0, z=0) { return {x, y, z}; }
+function add3(a, b) { return {x: a.x+b.x, y: a.y+b.y, z: a.z+b.z}; }
+function sub3(a, b) { return {x: a.x-b.x, y: a.y-b.y, z: a.z-b.z}; }
+function mul3(a, s) { return {x: a.x*s, y: a.y*s, z: a.z*s}; }
+function dot3(a, b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+function cross3(a, b) {
+  return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x };
+}
+function norm3(a) {
+  const l = Math.hypot(a.x, a.y, a.z);
+  return l > 1e-6 ? {x: a.x/l, y: a.y/l, z: a.z/l} : {x: 0, y: 1, z: 0};
+}
+
+// Matriz 4x4 Column-Major em Float32Array(16)
+function mat4Identity() {
+  const m = new Float32Array(16);
+  m[0]=1; m[5]=1; m[10]=1; m[15]=1;
+  return m;
+}
+function mat4Mul(a, b) {
+  const out = new Float32Array(16);
+  for (let c = 0; c < 4; ++c) {
+    for (let r = 0; r < 4; ++r) {
+      out[c*4 + r] = a[0*4 + r]*b[c*4 + 0] + a[1*4 + r]*b[c*4 + 1] + a[2*4 + r]*b[c*4 + 2] + a[3*4 + r]*b[c*4 + 3];
+    }
+  }
+  return out;
+}
+function mat4Vec4(m, x, y, z, w) {
+  return {
+    x: m[0]*x + m[4]*y + m[8]*z  + m[12]*w,
+    y: m[1]*x + m[5]*y + m[9]*z  + m[13]*w,
+    z: m[2]*x + m[6]*y + m[10]*z + m[14]*w,
+    w: m[3]*x + m[7]*y + m[11]*z + m[15]*w
+  };
+}
+function mat4Translation(x, y, z) {
+  const m = mat4Identity();
+  m[12]=x; m[13]=y; m[14]=z;
+  return m;
+}
+function mat4Scale(sx, sy, sz) {
+  const m = mat4Identity();
+  m[0]=sx; m[5]=sy; m[10]=sz;
+  return m;
+}
+function mat4RotX(a) {
+  const m = mat4Identity(), c = Math.cos(a), s = Math.sin(a);
+  m[5]=c; m[6]=s; m[9]=-s; m[10]=c;
+  return m;
+}
+function mat4RotY(a) {
+  const m = mat4Identity(), c = Math.cos(a), s = Math.sin(a);
+  m[0]=c; m[2]=-s; m[8]=s; m[10]=c;
+  return m;
+}
+function mat4RotZ(a) {
+  const m = mat4Identity(), c = Math.cos(a), s = Math.sin(a);
+  m[0]=c; m[1]=s; m[4]=-s; m[5]=c;
+  return m;
+}
+function mat4View6DoF(pos, yaw, pitch, roll) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const f = norm3({x: sy*cp, y: sp, z: -cy*cp});
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  const upT = norm3({x: sr*cy, y: cr, z: sr*sy});
+  const s = norm3(cross3(f, upT));
+  const u = cross3(s, f);
+  const m = mat4Identity();
+  m[0]=s.x; m[4]=s.y; m[8]=s.z;   m[12]=-dot3(s, pos);
+  m[1]=u.x; m[5]=u.y; m[9]=u.z;   m[13]=-dot3(u, pos);
+  m[2]=-f.x;m[6]=-f.y;m[10]=-f.z; m[14]=dot3(f, pos);
+  return m;
+}
+function mat4PerspectiveVulkan(fovY, aspect, zNear, zFar) {
+  const f = 1.0 / Math.tan(fovY * 0.5);
+  const rangeInv = 1.0 / (zNear - zFar);
+  const m = new Float32Array(16);
+  m[0] = f / aspect;
+  m[5] = -f;
+  m[10] = zFar * rangeInv;
+  m[11] = -1.0;
+  m[14] = zNear * zFar * rangeInv;
+  return m;
+}
+
+// ============================================================================
+// MÓDULO 3: GERADORES PROCEDURAIS DE MALHAS 3D (PIKACHU, CHARMANDER, BULBASAUR, GASTLY, POKÉBOLA)
+// ============================================================================
+function createMesh() { return { verts: [], indices: [] }; }
+function addQuad(m, i0, i1, i2, i3) {
+  m.indices.push(i0, i1, i2, i0, i2, i3);
+}
+function appendBox(m, cx, cy, cz, hx, hy, hz, col, animW=0) {
+  const b = m.verts.length;
+  const x0=cx-hx, x1=cx+hx, y0=cy-hy, y1=cy+hy, z0=cz-hz, z1=cz+hz;
+  const pts = [
+    [x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],
+    [x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0]
+  ];
+  for (let i=0; i<8; ++i) {
+    m.verts.push({ pos: vec3(pts[i][0], pts[i][1], pts[i][2]), norm: vec3(0,1,0), uv: animW, col });
+  }
+  addQuad(m, b+0,b+1,b+2,b+3); addQuad(m, b+5,b+4,b+7,b+6);
+  addQuad(m, b+4,b+0,b+3,b+7); addQuad(m, b+1,b+5,b+6,b+2);
+  addQuad(m, b+3,b+2,b+6,b+7); addQuad(m, b+4,b+5,b+1,b+0);
+}
+function appendEllipsoid(m, cx, cy, cz, rx, ry, rz, col, rings=6, sectors=10, animW=0.15) {
+  const b = m.verts.length;
+  for (let r=0; r<=rings; ++r) {
+    const v = r / rings, phi = v * Math.PI;
+    const sp = Math.sin(phi), cp = Math.cos(phi);
+    for (let s=0; s<=sectors; ++s) {
+      const th = (s / sectors) * Math.PI * 2;
+      const nx = sp * Math.cos(th), ny = cp, nz = sp * Math.sin(th);
+      m.verts.push({
+        pos: vec3(cx + nx*rx, cy + ny*ry, cz + nz*rz),
+        norm: norm3({x:nx, y:ny, z:nz}),
+        uv: animW, col
+      });
+    }
+  }
+  const stride = sectors + 1;
+  for (let r=0; r<rings; ++r) {
+    for (let s=0; s<sectors; ++s) {
+      const i0 = b + r*stride + s, i1 = i0 + 1;
+      const i2 = b + (r+1)*stride + (s+1), i3 = b + (r+1)*stride + s;
+      addQuad(m, i0, i2, i1, i3);
+    }
+  }
+}
+function appendCone(m, bx, by, bz, tx, ty, tz, rad, colBase, colTip, animTip=0.9) {
+  const b = m.verts.length;
+  const baseC = vec3(bx,by,bz), tip = vec3(tx,ty,tz);
+  const axis = norm3(sub3(tip, baseC));
+  const helper = Math.abs(axis.y) < 0.9 ? vec3(0,1,0) : vec3(1,0,0);
+  const right = mul3(norm3(cross3(axis, helper)), rad);
+  const fwd = mul3(norm3(cross3(right, axis)), rad);
+  m.verts.push(
+    { pos: add3(baseC, right), norm: right, uv: 0.2, col: colBase },
+    { pos: add3(baseC, fwd),   norm: fwd,   uv: 0.2, col: colBase },
+    { pos: sub3(baseC, right), norm: right, uv: 0.2, col: colBase },
+    { pos: sub3(baseC, fwd),   norm: fwd,   uv: 0.2, col: colBase },
+    { pos: tip,                norm: axis,  uv: animTip, col: colTip }
+  );
+  m.indices.push(b+0,b+1,b+4, b+1,b+2,b+4, b+2,b+3,b+4, b+3,b+0,b+4);
+  addQuad(m, b+3,b+2,b+1,b+0);
+}
+function recomputeNormals(m) {
+  for (const v of m.verts) v.norm = vec3(0,0,0);
+  for (let i=0; i<m.indices.length; i+=3) {
+    const v0 = m.verts[m.indices[i]], v1 = m.verts[m.indices[i+1]], v2 = m.verts[m.indices[i+2]];
+    const fn = cross3(sub3(v1.pos, v0.pos), sub3(v2.pos, v0.pos));
+    v0.norm = add3(v0.norm, fn); v1.norm = add3(v1.norm, fn); v2.norm = add3(v2.norm, fn);
+  }
+  for (const v of m.verts) v.norm = norm3(v.norm);
+  return m;
+}
+
+function buildPikachuMesh() {
+  const m = createMesh();
+  const yMain = vec3(1.0, 0.88, 0.12), yDark = vec3(0.92, 0.72, 0.06);
+  const red = vec3(0.98, 0.18, 0.16), blk = vec3(0.15, 0.15, 0.18);
+  appendBox(m, -0.22, 0.10, 0.10, 0.11, 0.10, 0.18, yDark, 0.0);
+  appendBox(m,  0.22, 0.10, 0.10, 0.11, 0.10, 0.18, yDark, 0.0);
+  appendEllipsoid(m, 0, 0.52, 0, 0.42, 0.44, 0.36, yMain, 6, 10, 0.15);
+  appendEllipsoid(m, 0, 1.08, 0.08, 0.38, 0.36, 0.35, yMain, 6, 10, 0.3);
+  appendBox(m, -0.26, 1.00, 0.38, 0.09, 0.09, 0.06, red, 0.35);
+  appendBox(m,  0.26, 1.00, 0.38, 0.09, 0.09, 0.06, red, 0.35);
+  appendCone(m, -0.22, 1.35, 0.05, -0.48, 1.92, 0.08, 0.12, yMain, blk, 0.85);
+  appendCone(m,  0.22, 1.35, 0.05,  0.48, 1.92, 0.08, 0.12, yMain, blk, 0.85);
+  appendBox(m, 0, 0.45, -0.40, 0.06, 0.10, 0.16, yDark, 0.5);
+  appendBox(m, 0, 0.72, -0.62, 0.07, 0.18, 0.18, yMain, 0.75);
+  appendBox(m, 0, 1.08, -0.86, 0.08, 0.26, 0.24, yMain, 1.0);
+  return recomputeNormals(m);
+}
+function buildCharmanderMesh() {
+  const m = createMesh();
+  const org = vec3(0.98, 0.45, 0.12), crm = vec3(0.98, 0.88, 0.52);
+  const flC = vec3(1.0, 0.95, 0.25), flT = vec3(1.0, 0.22, 0.05);
+  appendBox(m, -0.24, 0.18, 0.05, 0.13, 0.18, 0.16, org, 0);
+  appendBox(m,  0.24, 0.18, 0.05, 0.13, 0.18, 0.16, org, 0);
+  appendEllipsoid(m, 0, 0.62, 0, 0.38, 0.45, 0.34, org, 6, 10, 0.15);
+  appendBox(m, 0, 0.60, 0.28, 0.24, 0.32, 0.08, crm, 0.15);
+  appendEllipsoid(m, 0, 1.18, 0.10, 0.34, 0.32, 0.34, org, 6, 10, 0.25);
+  appendBox(m, 0, 1.10, 0.38, 0.22, 0.14, 0.16, org, 0.28);
+  appendBox(m, 0, 0.38, -0.45, 0.14, 0.14, 0.25, org, 0.5);
+  appendBox(m, 0, 0.55, -0.78, 0.10, 0.12, 0.22, org, 0.75);
+  appendCone(m, 0, 0.66, -0.95, 0, 1.28, -1.02, 0.22, flC, flT, 1.0);
+  return recomputeNormals(m);
+}
+function buildBulbasaurMesh() {
+  const m = createMesh();
+  const teal = vec3(0.18, 0.78, 0.72), grn = vec3(0.20, 0.85, 0.32), tip = vec3(0.45, 0.96, 0.35);
+  appendBox(m, -0.34, 0.20,  0.34, 0.14, 0.20, 0.14, teal, 0);
+  appendBox(m,  0.34, 0.20,  0.34, 0.14, 0.20, 0.14, teal, 0);
+  appendBox(m, -0.34, 0.20, -0.34, 0.14, 0.20, 0.14, teal, 0);
+  appendBox(m,  0.34, 0.20, -0.34, 0.14, 0.20, 0.14, teal, 0);
+  appendEllipsoid(m, 0, 0.52, 0, 0.48, 0.34, 0.55, teal, 6, 10, 0.15);
+  appendEllipsoid(m, 0, 0.68, 0.54, 0.38, 0.30, 0.32, teal, 6, 10, 0.25);
+  appendEllipsoid(m, 0, 0.92, -0.10, 0.52, 0.42, 0.52, grn, 6, 12, 0.6);
+  appendCone(m, 0, 1.20, -0.10, 0, 1.56, -0.10, 0.28, grn, tip, 0.95);
+  return recomputeNormals(m);
+}
+function buildGastlyMesh() {
+  const m = createMesh();
+  const core = vec3(0.34, 0.14, 0.52), eye = vec3(0.98, 0.95, 1.0), gas = vec3(0.74, 0.30, 0.95);
+  appendEllipsoid(m, 0, 1.05, 0, 0.52, 0.52, 0.52, core, 7, 12, 0.45);
+  appendBox(m, -0.20, 1.12, 0.46, 0.14, 0.16, 0.08, eye, 0.45);
+  appendBox(m,  0.20, 1.12, 0.46, 0.14, 0.16, 0.08, eye, 0.45);
+  appendCone(m, -0.55, 1.10, -0.15, -0.95, 1.55, -0.35, 0.22, gas, gas, 1.0);
+  appendCone(m,  0.55, 1.10, -0.15,  0.95, 1.55, -0.35, 0.22, gas, gas, 1.0);
+  appendCone(m,  0.00, 1.45, -0.25,  0.00, 1.95, -0.45, 0.24, gas, gas, 1.0);
+  return recomputeNormals(m);
+}
+function buildPokeballMesh(rad=0.26, rings=9, sectors=14) {
+  const m = createMesh();
+  const red = vec3(0.96, 0.14, 0.14), wht = vec3(0.96, 0.96, 0.98), blk = vec3(0.12, 0.12, 0.15);
+  for (let r=0; r<=rings; ++r) {
+    const phi = (r / rings) * Math.PI, sp = Math.sin(phi), cp = Math.cos(phi);
+    const col = Math.abs(cp) <= 0.14 ? blk : (cp > 0.14 ? red : wht);
+    for (let s=0; s<=sectors; ++s) {
+      const th = (s / sectors) * Math.PI * 2;
+      const n = norm3({x: sp*Math.cos(th), y: cp, z: sp*Math.sin(th)});
+      m.verts.push({ pos: mul3(n, rad), norm: n, uv: 0, col });
+    }
+  }
+  const stride = sectors + 1;
+  for (let r=0; r<rings; ++r) {
+    for (let s=0; s<sectors; ++s) {
+      const i0 = r*stride + s, i1 = i0+1, i2 = (r+1)*stride + (s+1), i3 = (r+1)*stride + s;
+      addQuad(m, i0, i2, i1, i3);
+    }
+  }
+  appendBox(m, 0, 0, rad*0.96, rad*0.24, rad*0.24, rad*0.14, wht, 0);
+  return recomputeNormals(m);
+}
+function buildAnchorRingMesh(outerR=0.88, thick=0.11, segs=18) {
+  const m = createMesh();
+  const innerR = outerR - thick, cyan = vec3(0.15, 0.95, 0.85);
+  for (let s=0; s<=segs; ++s) {
+    const a = (s / segs) * Math.PI * 2, c = Math.cos(a), sn = Math.sin(a);
+    m.verts.push(
+      { pos: vec3(innerR*c, 0.02, innerR*sn), norm: vec3(0,1,0), uv: 0, col: cyan },
+      { pos: vec3(outerR*c, 0.02, outerR*sn), norm: vec3(0,1,0), uv: 0, col: cyan }
+    );
+  }
+  for (let s=0; s<segs; ++s) {
+    const b = s*2;
+    addQuad(m, b+0, b+2, b+3, b+1);
+  }
+  return m;
+}
+
+const MESHES = {
+  species: [buildPikachuMesh(), buildCharmanderMesh(), buildBulbasaurMesh(), buildGastlyMesh()],
+  pokeball: buildPokeballMesh(),
+  ring: buildAnchorRingMesh()
+};
+
+// ============================================================================
+// ESTADO GLOBAL DO MOTOR ADAPTATIVO, CÂMERA E RASTREADOR KLT
+// ============================================================================
+const canvas = document.getElementById("ascii-canvas");
+const ctx = canvas.getContext("2d", { alpha: false });
+const radarCanvas = document.getElementById("radar-box");
+const radarCtx = radarCanvas.getContext("2d");
+const video = document.getElementById("cam-video");
+const offCanvas = document.createElement("canvas");
+const offCtx = offCanvas.getContext("2d", { willReadFrequently: true });
+
+let cols = 110, rows = 38;
+let cellW = 10, cellH = 18;
+let renderMode = 0; // 0: ASCII-3D, 1: HalfBlock, 2: Braille
+let useRealCamera = false;
+let hasImu = false;
+let imuYaw = 0, imuPitch = 0.05, imuRoll = 0, imuBaseAlpha = null;
+
+// Governador Dinâmico de Qualidade e FPS
+let qualityProfile = 1; // 0: ULTRA, 1: BALANCED, 2: ECO-LIGHT
+let emaFrameMs = 16.0;
+let stableFrames = 0;
+
+// Pose 6DoF Rastreada
+const pose = {
+  pos: vec3(0, 0, 0),
+  yaw: 0.0,
+  pitch: 0.05,
+  roll: 0.0,
+  floorY: -1.25,
+  tier: "SobelKLT-Visual",
+  trackedCount: 0
+};
+
+// Buffers Pré-Alocados (Câmera + KLT + G-Buffer 3D)
+const MAX_CELLS = 260 * 180;
+const camR = new Float32Array(MAX_CELLS);
+const camG = new Float32Array(MAX_CELLS);
+const camB = new Float32Array(MAX_CELLS);
+const camLum = new Float32Array(MAX_CELLS);
+const camGx = new Float32Array(MAX_CELLS);
+const camGy = new Float32Array(MAX_CELLS);
+const camMag = new Float32Array(MAX_CELLS);
+const camHarris = new Float32Array(MAX_CELLS);
+
+const prevLum = new Float32Array(MAX_CELLS);
+const prevGx = new Float32Array(MAX_CELLS);
+const prevGy = new Float32Array(MAX_CELLS);
+let hasPrevCam = false;
+let kltPoints = [];
+
+const gbR = new Float32Array(MAX_CELLS);
+const gbG = new Float32Array(MAX_CELLS);
+const gbB = new Float32Array(MAX_CELLS);
+const gbDepth = new Float32Array(MAX_CELLS);
+const gbNdcZ = new Float32Array(MAX_CELLS);
+const gbNx = new Float32Array(MAX_CELLS);
+const gbNy = new Float32Array(MAX_CELLS);
+const gbNz = new Float32Array(MAX_CELLS);
+const gbId = new Uint16Array(MAX_CELLS);
+
+// Sessão de Jogo AR (4 Pokémons ancorados em 360 graus ao redor do jogador)
+const pokemons = [
+  { species: 0, pos: vec3(0.0, -1.25, -3.4), yaw: 0, cp: 420, insideBall: false },
+  { species: 1, pos: vec3(2.9, -1.25, -2.6), yaw: -0.75, cp: 510, insideBall: false },
+  { species: 2, pos: vec3(-2.8, -1.25, -2.8), yaw: 0.75, cp: 485, insideBall: false },
+  { species: 3, pos: vec3(0.4, -1.10, 3.6), yaw: Math.PI, cp: 666, insideBall: false }
+];
+
+const ball = {
+  state: 0, // 0: Idle, 1: Flying, 2: Shake, 3: Success
+  pos: vec3(0,0,0),
+  vel: vec3(0,0,0),
+  spin: 0,
+  timer: 0,
+  shakes: 0,
+  targetIdx: -1
+};
+let totalCaptured = 0;
+
+function setBanner(msg) {
+  document.getElementById("status-banner").textContent = msg;
+}
+
+// ============================================================================
+// REDIMENSIONAMENTO ADAPTATIVO SEGUNDO O GOVERNADOR DE HARDWARE
+// ============================================================================
+function updateViewportMetrics() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  const scaleFactor = qualityProfile === 0 ? 1.0 : (qualityProfile === 1 ? 1.15 : 1.38);
+  const baseFontPx = Math.max(10, Math.min(18, Math.floor((window.innerWidth / 95) * scaleFactor)));
+  cellH = baseFontPx + 2;
+  cellW = Math.max(6, Math.floor(cellH * 0.55));
+  cols = Math.max(50, Math.min(160, Math.floor(canvas.width / cellW)));
+  rows = Math.max(24, Math.min(80, Math.floor(canvas.height / cellH)));
+  offCanvas.width = cols;
+  offCanvas.height = rows;
+  ctx.font = `bold ${baseFontPx}px "Cascadia Mono", "Consolas", monospace`;
+  ctx.textBaseline = "top";
+}
+window.addEventListener("resize", updateViewportMetrics);
+updateViewportMetrics();
+
+// ============================================================================
+// CAPTURA DE CÂMERA + FILTRO SOBEL 2D + RASTREADOR KLT LUCAS-KANADE
+// ============================================================================
+async function toggleCamera() {
+  if (useRealCamera) {
+    useRealCamera = false;
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+    }
+    setBanner("Modo Ambiente AR Sintético ativado (Rastreamento Sobel KLT ativo).");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 160 }, height: { ideal: 120 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    useRealCamera = true;
+    hasPrevCam = false;
+    setBanner("Câmera Real ativada em baixa resolução! Rastreando ambiente via Sobel KLT...");
+  } catch (e) {
+    useRealCamera = false;
+    setBanner("Câmera física indisponível (" + e.message + "). Usando Ambiente AR 3D Sintético.");
+  }
+}
+
+async function enableImuSensors() {
+  try {
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      if (perm !== "granted") {
+        setBanner("Permissão de Giroscópio negada. Mantendo rastreamento 100% Visual Sobel KLT.");
+        return;
+      }
+    }
+    window.addEventListener("deviceorientation", (ev) => {
+      if (ev.alpha === null || ev.beta === null) return;
+      if (imuBaseAlpha === null) imuBaseAlpha = ev.alpha;
+      const dAlpha = ((ev.alpha - imuBaseAlpha + 540) % 360) - 180;
+      imuYaw = -dAlpha * (Math.PI / 180);
+      imuPitch = Math.max(-0.7, Math.min(0.7, (ev.beta - 75) * (Math.PI / 180)));
+      imuRoll = (ev.gamma || 0) * (Math.PI / 180) * 0.25;
+      hasImu = true;
+    });
+    setBanner("Sensores IMU (Giroscópio + Gravidade) integrados ao Fluxo Óptico Sobel KLT!");
+  } catch (e) {
+    setBanner("Sensores IMU não suportados neste navegador. Rastreamento Sobel KLT ativo.");
+  }
+}
+
+function captureAndComputeSobel(timeSec) {
+  const w = cols, h = rows;
+  if (useRealCamera && video.readyState >= 2) {
+    offCtx.drawImage(video, 0, 0, w, h);
+    const img = offCtx.getImageData(0, 0, w, h).data;
+    for (let i = 0, p = 0; i < w * h; ++i, p += 4) {
+      const r = img[p] / 255, g = img[p+1] / 255, b = img[p+2] / 255;
+      camR[i] = r; camG[i] = g; camB[i] = b;
+      camLum[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+  } else {
+    // Ambiente Sintético 3D (Parque AR com piso, caminho, árvores e horizonte fixos no mundo)
+    const fovX = 70 * Math.PI / 180, fovY = 45 * Math.PI / 180;
+    for (let y = 0; y < h; ++y) {
+      const ny = (y / h) - 0.5;
+      const rayPitch = pose.pitch - ny * fovY;
+      for (let x = 0; x < w; ++x) {
+        const nx = (x / w) - 0.5;
+        const rayYaw = pose.yaw + nx * fovX;
+        let r = 0.1, g = 0.16, b = 0.28;
+        if (rayPitch < -0.02) {
+          const dist = Math.min(30, (1.25 + pose.pos.y) / Math.max(0.02, -Math.tan(rayPitch)));
+          const wx = pose.pos.x + Math.sin(rayYaw) * dist;
+          const wz = pose.pos.z - Math.cos(rayYaw) * dist;
+          const tx = Math.floor(wx * 1.2), tz = Math.floor(wz * 1.2);
+          const chk = ((tx ^ tz) & 1) !== 0;
+          if (Math.abs(wx) < 1.1) {
+            r = chk ? 0.42 : 0.32; g = chk ? 0.40 : 0.30; b = chk ? 0.36 : 0.27;
+          } else {
+            r = chk ? 0.14 : 0.22; g = chk ? 0.34 : 0.44; b = chk ? 0.18 : 0.24;
+          }
+        } else {
+          const hill = 0.12 + 0.07 * Math.sin(rayYaw * 5) + 0.04 * Math.cos(rayYaw * 13);
+          if (rayPitch < hill) {
+            const brk = 0.5 + 0.5 * Math.sin(rayYaw * 28);
+            r = 0.10 + 0.08*brk; g = 0.28 + 0.12*brk; b = 0.14;
+          } else {
+            const st = Math.max(0, Math.min(1, rayPitch / 0.5));
+            r = 0.22*(1-st) + 0.08*st; g = 0.48*(1-st) + 0.20*st; b = 0.78*(1-st) + 0.46*st;
+          }
+        }
+        const idx = y * w + x;
+        camR[idx] = r; camG[idx] = g; camB[idx] = b;
+        camLum[idx] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      }
+    }
+  }
+
+  // Passo Único: Gradientes Sobel 3x3 + Resposta Estrutural de Canto de Harris
+  for (let y = 1; y + 1 < h; ++y) {
+    for (let x = 1; x + 1 < w; ++x) {
+      const i = y * w + x;
+      const l00 = camLum[(y-1)*w + (x-1)], l10 = camLum[(y-1)*w + x], l20 = camLum[(y-1)*w + (x+1)];
+      const l01 = camLum[y*w + (x-1)],                                l21 = camLum[y*w + (x+1)];
+      const l02 = camLum[(y+1)*w + (x-1)], l12 = camLum[(y+1)*w + x], l22 = camLum[(y+1)*w + (x+1)];
+      const gx = (l20 + 2*l21 + l22) - (l00 + 2*l01 + l02);
+      const gy = (l02 + 2*l12 + l22) - (l00 + 2*l10 + l20);
+      const mag = Math.hypot(gx, gy);
+      camGx[i] = gx; camGy[i] = gy; camMag[i] = mag;
+      const ixx = gx*gx, iyy = gy*gy, tr = ixx + iyy;
+      camHarris[i] = tr > 1e-4 ? (ixx * iyy) / tr + 0.15 * mag : 0;
+    }
+  }
+}
+
+function detectKltFeatures(maxPts) {
+  kltPoints = [];
+  const w = cols, h = rows;
+  const gCols = 6, gRows = 4;
+  const cw = Math.max(1, Math.floor((w - 6) / gCols));
+  const ch = Math.max(1, Math.floor((h - 6) / gRows));
+  for (let gr = 0; gr < gRows; ++gr) {
+    for (let gc = 0; gc < gCols; ++gc) {
+      if (kltPoints.length >= maxPts) break;
+      let bestScore = 0.04, bx = 0, by = 0;
+      const x0 = 3 + gc*cw, y0 = 3 + gr*ch;
+      const x1 = Math.min(w-3, x0+cw), y1 = Math.min(h-3, y0+ch);
+      for (let y = y0; y < y1; ++y) {
+        for (let x = x0; x < x1; ++x) {
+          const sc = camHarris[y*w + x];
+          if (sc > bestScore) { bestScore = sc; bx = x; by = y; }
+        }
+      }
+      if (bx > 0) kltPoints.push({ x: bx, y: by, px: bx, py: by, valid: true });
+    }
+  }
+}
+
+function updateAdaptiveTracker(dt) {
+  // Governador Dinâmico de FPS
+  const ms = Math.max(1, Math.min(100, dt * 1000));
+  emaFrameMs = emaFrameMs * 0.9 + ms * 0.1;
+  if (emaFrameMs > 23 && qualityProfile < 2) {
+    qualityProfile++;
+    stableFrames = 0;
+    updateViewportMetrics();
+  } else if (emaFrameMs < 12 && qualityProfile > 0) {
+    if (++stableFrames > 75) {
+      qualityProfile--;
+      stableFrames = 0;
+      updateViewportMetrics();
+    }
+  }
+
+  const maxPts = qualityProfile === 0 ? 48 : (qualityProfile === 1 ? 32 : 16);
+  const w = cols, h = rows;
+  if (!hasPrevCam || kltPoints.length < maxPts / 3) {
+    detectKltFeatures(maxPts);
+  }
+
+  const dxs = [], dys = [];
+  let validCount = 0;
+
+  if (hasPrevCam) {
+    const sr = 3;
+    for (const pt of kltPoints) {
+      if (!pt.valid) continue;
+      const px = Math.round(pt.x), py = Math.round(pt.y);
+      if (px < 5 || px >= w-5 || py < 5 || py >= h-5) { pt.valid = false; continue; }
+      let bestSad = 1e9, bdx = 0, bdy = 0;
+      for (let dy = -sr; dy <= sr; ++dy) {
+        for (let dx = -sr; dx <= sr; ++dx) {
+          const cx = px + dx, cy = py + dy;
+          let sad = 0;
+          for (let wy = -1; wy <= 1; ++wy) {
+            for (let wx = -1; wx <= 1; ++wx) {
+              const pi = (py+wy)*w + (px+wx), ci = (cy+wy)*w + (cx+wx);
+              sad += Math.abs(prevLum[pi] - camLum[ci]) + 0.25*Math.abs(prevGx[pi] - camGx[ci]);
+            }
+          }
+          sad += 0.004 * (dx*dx + dy*dy);
+          if (sad < bestSad) { bestSad = sad; bdx = dx; bdy = dy; }
+        }
+      }
+      if (bestSad > 1.8) { pt.valid = false; continue; }
+      const ni = (py+bdy)*w + (px+bdx), pi = py*w + px;
+      const it = camLum[ni] - prevLum[pi], gx = camGx[ni], gy = camGy[ni];
+      const den = gx*gx + gy*gy + 0.05;
+      const tdx = bdx + Math.max(-0.7, Math.min(0.7, -it*gx/den));
+      const tdy = bdy + Math.max(-0.7, Math.min(0.7, -it*gy/den));
+      pt.px = pt.x; pt.py = pt.y;
+      pt.x += tdx; pt.y += tdy;
+      dxs.push(tdx); dys.push(tdy);
+      validCount++;
+    }
+  }
+
+  if (validCount < maxPts / 2) {
+    detectKltFeatures(maxPts);
+    validCount = kltPoints.length;
+  }
+
+  // Salva buffers para o próximo frame
+  const total = w * h;
+  for (let i = 0; i < total; ++i) {
+    prevLum[i] = camLum[i]; prevGx[i] = camGx[i]; prevGy[i] = camGy[i];
+  }
+  hasPrevCam = true;
+  pose.trackedCount = validCount;
+
+  // Filtro Mediano para rejeição de outliers
+  let medDx = 0, medDy = 0;
+  if (dxs.length > 0) {
+    dxs.sort((a,b) => a-b); dys.sort((a,b) => a-b);
+    medDx = dxs[Math.floor(dxs.length/2)];
+    medDy = dys[Math.floor(dys.length/2)];
+  }
+
+  const visDyaw = (-medDx / Math.max(1, w)) * (70 * Math.PI / 180);
+  const visDpitch = (medDy / Math.max(1, h)) * (45 * Math.PI / 180);
+
+  if (hasImu) {
+    pose.tier = "IMU+SobelKLT";
+    pose.yaw = imuYaw + visDyaw * 0.2;
+    pose.pitch = imuPitch;
+    pose.roll = imuRoll;
+  } else if (useRealCamera) {
+    pose.tier = "SobelKLT-Visual";
+    pose.yaw += visDyaw;
+    pose.pitch = Math.max(-0.65, Math.min(0.65, pose.pitch + visDpitch));
+  } else {
+    pose.tier = "Sim+SobelKLT";
+  }
+}
+
+// ============================================================================
+// MÓDULO 5: RASTERIZADOR 3D OFFSCREEN -> G-BUFFER
+// ============================================================================
+function rasterizeScene(timeSec) {
+  const gw = renderMode === 2 ? cols * 2 : cols;
+  const gh = renderMode === 1 ? rows * 2 : (renderMode === 2 ? rows * 4 : rows);
+  const total = gw * gh;
+  for (let i = 0; i < total; ++i) {
+    gbNdcZ[i] = 1.0; gbDepth[i] = 35.0; gbId[i] = 0;
+  }
+
+  const aspect = (cols / rows) * (cellW / cellH);
+  const view = mat4View6DoF(pose.pos, pose.yaw, pose.pitch, pose.roll);
+  const proj = mat4PerspectiveVulkan(45 * Math.PI / 180, aspect, 0.35, 35.0);
+
+  const cmds = [];
+  for (let i = 0; i < pokemons.length; ++i) {
+    const p = pokemons[i];
+    cmds.push({
+      mesh: MESHES.ring,
+      model: mat4Mul(mat4Translation(p.pos.x, p.pos.y, p.pos.z), mat4RotY(timeSec * 0.8)),
+      tint: p.insideBall ? vec3(1, 0.85, 0.2) : vec3(0.2, 1, 0.85),
+      waveMode: 0, amp: 0, phase: 0, id: 10 + i
+    });
+    if (!p.insideBall) {
+      cmds.push({
+        mesh: MESHES.species[p.species],
+        model: mat4Mul(mat4Translation(p.pos.x, p.pos.y, p.pos.z), mat4RotY(p.yaw)),
+        tint: vec3(1, 1, 1),
+        waveMode: p.species === 3 ? 2 : 1,
+        amp: 0.16, phase: i * 1.7, id: 50 + i
+      });
+    }
+  }
+
+  if (ball.state !== 0) {
+    let bModel = mat4Translation(ball.pos.x, ball.pos.y, ball.pos.z);
+    let bTint = vec3(1, 1, 1);
+    if (ball.state === 1) {
+      bModel = mat4Mul(bModel, mat4Mul(mat4RotX(ball.spin), mat4RotY(timeSec * 4)));
+    } else if (ball.state === 2) {
+      bModel = mat4Mul(bModel, mat4RotZ(0.45 * Math.sin(ball.timer * 14)));
+    } else {
+      bModel = mat4Mul(bModel, mat4Scale(1.15, 1.15, 1.15));
+      bTint = vec3(0.4, 1.0, 0.55);
+    }
+    cmds.push({ mesh: MESHES.pokeball, model: bModel, tint: bTint, waveMode: 0, amp: 0, phase: 0, id: 200 });
+  }
+
+  const lightDir = norm3({x: 0.38, y: 0.82, z: 0.42});
+
+  for (const cmd of cmds) {
+    const mv = mat4Mul(view, cmd.model);
+    const mvp = mat4Mul(proj, mv);
+    const verts = cmd.mesh.verts, indices = cmd.mesh.indices;
+
+    for (let t = 0; t < indices.length; t += 3) {
+      const v0 = verts[indices[t]], v1 = verts[indices[t+1]], v2 = verts[indices[t+2]];
+      const rawV = [v0, v1, v2];
+      const sx = [0,0,0], sy = [0,0,0], sz = [0,0,0], invW = [0,0,0];
+      const vnx = [0,0,0], vny = [0,0,0], vnz = [0,0,0];
+      let behind = false;
+
+      for (let k = 0; k < 3; ++k) {
+        const rv = rawV[k];
+        let px = rv.pos.x, py = rv.pos.y, pz = rv.pos.z;
+        if (cmd.waveMode === 1) {
+          const w = rv.uv;
+          py += cmd.amp * 0.35 * w * Math.sin(5.5 * timeSec + cmd.phase);
+          px += cmd.amp * (w*w) * Math.cos(7.1 * timeSec - 3.2 * w + cmd.phase);
+        } else if (cmd.waveMode === 2) {
+          py += cmd.amp * Math.sin(5.5 * timeSec + cmd.phase);
+          px += cmd.amp * 0.6 * Math.sin(9.0 * timeSec + py * 2.5);
+        }
+        const clip = mat4Vec4(mvp, px, py, pz, 1.0);
+        if (clip.w <= 0.18) { behind = true; break; }
+        const iw = 1.0 / clip.w;
+        invW[k] = iw;
+        const ndcX = clip.x * iw, ndcY = clip.y * iw, ndcZ = clip.z * iw;
+        sx[k] = (ndcX * 0.5 + 0.5) * gw;
+        sy[k] = (ndcY * 0.5 + 0.5) * gh;
+        sz[k] = ndcZ;
+        const vn = norm3(mat4Vec4(mv, rv.norm.x, rv.norm.y, rv.norm.z, 0.0));
+        vnx[k] = vn.x; vny[k] = vn.y; vnz[k] = vn.z;
+      }
+      if (behind) continue;
+
+      const area = (sx[2] - sx[0]) * (sy[1] - sy[0]) - (sy[2] - sy[0]) * (sx[1] - sx[0]);
+      if (Math.abs(area) < 1e-5) continue;
+      const invArea = 1.0 / area;
+
+      const x0 = Math.max(0, Math.floor(Math.min(sx[0], sx[1], sx[2])));
+      const x1 = Math.min(gw - 1, Math.ceil(Math.max(sx[0], sx[1], sx[2])));
+      const y0 = Math.max(0, Math.floor(Math.min(sy[0], sy[1], sy[2])));
+      const y1 = Math.min(gh - 1, Math.ceil(Math.max(sy[0], sy[1], sy[2])));
+
+      for (let py = y0; py <= y1; ++py) {
+        const pfy = py + 0.5;
+        for (let px = x0; px <= x1; ++px) {
+          const pfx = px + 0.5;
+          const w0 = ((pfx - sx[1]) * (sy[2] - sy[1]) - (pfy - sy[1]) * (sx[2] - sx[1])) * invArea;
+          const w1 = ((pfx - sx[2]) * (sy[0] - sy[2]) - (pfy - sy[2]) * (sx[0] - sx[2])) * invArea;
+          const w2 = 1.0 - w0 - w1;
+          if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+
+          const zNdc = w0*sz[0] + w1*sz[1] + w2*sz[2];
+          if (zNdc < 0 || zNdc > 1) continue;
+          const idx = py * gw + px;
+          if (zNdc >= gbNdcZ[idx]) continue;
+          gbNdcZ[idx] = zNdc;
+
+          const pw0 = w0*invW[0], pw1 = w1*invW[1], pw2 = w2*invW[2];
+          const pSum = 1.0 / (pw0 + pw1 + pw2);
+          const b0 = pw0*pSum, b1 = pw1*pSum, b2 = pw2*pSum;
+
+          let nx = vnx[0]*b0 + vnx[1]*b1 + vnx[2]*b2;
+          let ny = vny[0]*b0 + vny[1]*b1 + vny[2]*b2;
+          let nz = vnz[0]*b0 + vnz[1]*b1 + vnz[2]*b2;
+          if (area < 0) { nx = -nx; ny = -ny; nz = -nz; }
+
+          const ndotl = Math.max(0, nx*lightDir.x + ny*lightDir.y + nz*lightDir.z);
+          const rim = Math.pow(1.0 - Math.min(1.0, Math.abs(nz)), 2) * 0.4;
+          const lit = Math.min(1.35, 0.34 + 0.72 * ndotl + rim);
+
+          const cr = (v0.col.x*b0 + v1.col.x*b1 + v2.col.x*b2) * cmd.tint.x * lit;
+          const cg = (v0.col.y*b0 + v1.col.y*b1 + v2.col.y*b2) * cmd.tint.y * lit;
+          const cb = (v0.col.z*b0 + v1.col.z*b1 + v2.col.z*b2) * cmd.tint.z * lit;
+
+          gbR[idx] = Math.min(1, cr);
+          gbG[idx] = Math.min(1, cg);
+          gbB[idx] = Math.min(1, cb);
+          gbDepth[idx] = (0.35 * 35.0) / (35.0 - zNdc * (35.0 - 0.35));
+          gbNx[idx] = nx; gbNy[idx] = ny; gbNz[idx] = nz;
+          gbId[idx] = cmd.id;
+        }
+      }
+    }
+  }
+  return { gw, gh };
+}
+
+// ============================================================================
+// MÓDULO 6: QUANTIZADOR ASCII 3D + FUSÃO CÂMERA REAL & RENDERIZAÇÃO CANVAS
+// ============================================================================
+function edgeGlyph(gx, gy) {
+  const ax = Math.abs(gx), ay = Math.abs(gy);
+  if (ax > ay * 2.0) return "|";
+  if (ay > ax * 2.0) return "-";
+  return (gx * gy >= 0) ? "/" : "\\";
+}
+function lumGlyph(lum) {
+  const idx = Math.min(RAMP.length - 1, Math.max(0, Math.round(lum * (RAMP.length - 1))));
+  return RAMP[idx];
+}
+function structField(x, y, gw, gh) {
+  const cx = Math.max(0, Math.min(gw-1, x)), cy = Math.max(0, Math.min(gh-1, y));
+  const i = cy * gw + cx;
+  if (gbId[i] === 0) return 0;
+  return (1.0 - Math.min(0.85, gbDepth[i] / 35.0)) + 0.18 * gbNx[i] + 0.18 * gbNy[i];
+}
+function rgbCss(r, g, b) {
+  return `rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`;
+}
+
+function renderAsciiFrame(gw, gh) {
+  ctx.fillStyle = "#070b10";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let r = 0; r < rows; ++r) {
+    const py = r * cellH;
+    for (let c = 0; c < cols; ++c) {
+      const px = c * cellW;
+      const ci = r * cols + c;
+      const cr = camR[ci], cg = camG[ci], cb = camB[ci];
+
+      if (renderMode === 1 && gh === rows * 2) {
+        const iTop = (r*2) * gw + c, iBot = (r*2+1) * gw + c;
+        const tr = gbId[iTop] ? gbR[iTop] : cr*0.72, tg = gbId[iTop] ? gbG[iTop] : cg*0.72, tb = gbId[iTop] ? gbB[iTop] : cb*0.72;
+        const br = gbId[iBot] ? gbR[iBot] : cr*0.72, bg = gbId[iBot] ? gbG[iBot] : cg*0.72, bb = gbId[iBot] ? gbB[iBot] : cb*0.72;
+        ctx.fillStyle = rgbCss(br, bg, bb);
+        ctx.fillRect(px, py, cellW, cellH);
+        ctx.fillStyle = rgbCss(tr, tg, tb);
+        ctx.fillText("▀", px, py);
+        continue;
+      }
+
+      const gi = Math.min(r, gh-1) * gw + Math.min(c, gw-1);
+      const id = gbId[gi];
+
+      if (id === 0) {
+        ctx.fillStyle = rgbCss(cr*0.26, cg*0.26, cb*0.26);
+        ctx.fillRect(px, py, cellW, cellH);
+        const ch = camMag[ci] >= 0.28 ? edgeGlyph(camGx[ci], camGy[ci]) : lumGlyph(camLum[ci]);
+        ctx.fillStyle = rgbCss(cr*0.76, cg*0.76, cb*0.76);
+        ctx.fillText(ch, px, py);
+      } else {
+        const s00 = structField(c-1,r-1,gw,gh), s10 = structField(c,r-1,gw,gh), s20 = structField(c+1,r-1,gw,gh);
+        const s01 = structField(c-1,r,gw,gh),                                   s21 = structField(c+1,r,gw,gh);
+        const s02 = structField(c-1,r+1,gw,gh), s12 = structField(c,r+1,gw,gh), s22 = structField(c+1,r+1,gw,gh);
+        const gx = (s20 + 2*s21 + s22) - (s00 + 2*s01 + s02);
+        const gy = (s02 + 2*s12 + s22) - (s00 + 2*s10 + s20);
+        const gmag = Math.hypot(gx, gy);
+
+        const sil = (gbId[r*gw + Math.max(0,c-1)] !== id) || (gbId[r*gw + Math.min(gw-1,c+1)] !== id) ||
+                    (gbId[Math.max(0,r-1)*gw + c] !== id) || (gbId[Math.min(gh-1,r+1)*gw + c] !== id);
+
+        const ar = gbR[gi], ag = gbG[gi], ab = gbB[gi];
+        ctx.fillStyle = rgbCss(ar*0.46 + cr*0.14, ag*0.46 + cg*0.14, ab*0.46 + cb*0.14);
+        ctx.fillRect(px, py, cellW, cellH);
+
+        let ch;
+        if ((sil && gmag > 0.14) || gmag >= 0.32) {
+          ch = edgeGlyph(gx, gy);
+          ctx.fillStyle = rgbCss(Math.min(1, ar*1.25+0.12), Math.min(1, ag*1.25+0.12), Math.min(1, ab*1.25+0.12));
+        } else {
+          ch = renderMode === 2 ? "⣿" : lumGlyph(0.2126*ar + 0.7152*ag + 0.0722*ab);
+          ctx.fillStyle = rgbCss(ar, ag, ab);
+        }
+        ctx.fillText(ch, px, py);
+      }
+    }
+  }
+
+  // Pontos '+' verdes de ancoragem KLT do ambiente real
+  ctx.fillStyle = "#46ffa0";
+  for (const pt of kltPoints) {
+    if (!pt.valid) continue;
+    const tc = Math.min(cols-1, Math.max(0, Math.round(pt.x)));
+    const tr = Math.min(rows-1, Math.max(0, Math.round(pt.y)));
+    if (gbId[tr * cols + tc] === 0) {
+      ctx.fillText("+", tc * cellW, tr * cellH);
+    }
+  }
+}
+
+function drawRadar() {
+  const w = radarCanvas.width, h = radarCanvas.height, cx = w/2, cy = h/2;
+  radarCtx.clearRect(0, 0, w, h);
+  radarCtx.strokeStyle = "rgba(40, 240, 160, 0.45)";
+  radarCtx.beginPath(); radarCtx.arc(cx, cy, 40, 0, Math.PI*2); radarCtx.stroke();
+  radarCtx.beginPath(); radarCtx.arc(cx, cy, 20, 0, Math.PI*2); radarCtx.stroke();
+
+  // Cone de visão do jogador (sempre para cima no radar relativo)
+  radarCtx.fillStyle = "rgba(40, 240, 160, 0.18)";
+  radarCtx.beginPath();
+  radarCtx.moveTo(cx, cy);
+  radarCtx.arc(cx, cy, 42, -Math.PI/2 - 0.55, -Math.PI/2 + 0.55);
+  radarCtx.closePath();
+  radarCtx.fill();
+
+  const cyaw = Math.cos(pose.yaw), syaw = Math.sin(pose.yaw);
+  const colors = ["#ffe020", "#ff7520", "#30e8c0", "#c050ff"];
+  for (let i = 0; i < pokemons.length; ++i) {
+    const p = pokemons[i];
+    const dx = p.pos.x - pose.pos.x, dz = p.pos.z - pose.pos.z;
+    const rx = dx * cyaw + dz * syaw;
+    const rz = -dx * syaw + dz * cyaw;
+    const px = cx + rx * 8.5, py = cy + rz * 8.5;
+    radarCtx.fillStyle = colors[p.species];
+    radarCtx.beginPath(); radarCtx.arc(px, py, 4.5, 0, Math.PI*2); radarCtx.fill();
+  }
+}
+
+// ============================================================================
+// FÍSICA DE ARREMESSO DE POKÉBOLA 3D E CONTROLES (SWIPE / TECLADO)
+// ============================================================================
+function throwPokeball(speed=7.2, upAngle=0.34, yawOffset=0.0) {
+  if (ball.state === 2) return;
+  if (ball.targetIdx >= 0) pokemons[ball.targetIdx].insideBall = false;
+  const lyaw = pose.yaw + yawOffset;
+  const lpitch = Math.max(-0.35, Math.min(0.95, pose.pitch + upAngle));
+  const dir = norm3({ x: Math.sin(lyaw)*Math.cos(lpitch), y: Math.sin(lpitch), z: -Math.cos(lyaw)*Math.cos(lpitch) });
+  const fwd = { x: Math.sin(pose.yaw), y: 0, z: -Math.cos(pose.yaw) };
+  ball.state = 1;
+  ball.pos = add3(pose.pos, { x: fwd.x*0.55, y: -0.25, z: fwd.z*0.55 });
+  ball.vel = mul3(dir, speed);
+  ball.spin = 0; ball.timer = 0; ball.shakes = 0; ball.targetIdx = -1;
+  setBanner("Pokébola 3D lançada! Rastreando colisão no ambiente AR...");
+}
+
+function updateGamePhysics(dt, timeSec) {
+  for (const p of pokemons) {
+    p.yaw = Math.atan2(pose.pos.x - p.pos.x, pose.pos.z - p.pos.z);
+  }
+  if (ball.state === 1) {
+    ball.vel.y -= 9.2 * dt;
+    ball.pos = add3(ball.pos, mul3(ball.vel, dt));
+    ball.spin += 14 * dt;
+
+    for (let i = 0; i < pokemons.length; ++i) {
+      const p = pokemons[i];
+      if (p.insideBall) continue;
+      const center = add3(p.pos, vec3(0, 0.82, 0));
+      const d = Math.hypot(ball.pos.x - center.x, ball.pos.y - center.y, ball.pos.z - center.z);
+      if (d <= 0.92) {
+        p.insideBall = true;
+        ball.state = 2; ball.targetIdx = i;
+        ball.pos = add3(p.pos, vec3(0, 0.28, 0));
+        ball.timer = 0; ball.shakes = 0;
+        setBanner(`ACERTOU ${SPECIES_NAMES[p.species]} (CP ${p.cp})! Balançando no chão (1/3)...`);
+        return;
+      }
+    }
+    if (ball.pos.y <= pose.floorY + 0.22 || Math.hypot(ball.pos.x-pose.pos.x, ball.pos.z-pose.pos.z) > 18) {
+      ball.state = 0;
+      setBanner("A Pokébola quicou no chão! Mire no Pokémon e arraste para cima para lançar.");
+    }
+  } else if (ball.state === 2) {
+    ball.timer += dt;
+    const sh = Math.floor(ball.timer / 0.65);
+    if (sh > ball.shakes && sh < 3) {
+      ball.shakes = sh;
+      const p = pokemons[ball.targetIdx];
+      setBanner(`Capturando ${SPECIES_NAMES[p.species]}... Shake (${sh+1}/3)!`);
+    }
+    if (ball.timer >= 2.0) {
+      ball.state = 3; ball.timer = 0;
+      totalCaptured++;
+      const p = pokemons[ball.targetIdx];
+      setBanner(`GOTCHA! ${SPECIES_NAMES[p.species]} (CP ${p.cp}) capturado em 3D! Total: ${totalCaptured}`);
+      const ang = (ball.targetIdx * 1.57) + 0.4 * Math.sin(timeSec);
+      p.pos = vec3(Math.sin(ang)*3.5, -1.25, -Math.cos(ang)*3.5);
+      p.cp = 220 + Math.floor(Math.random() * 580);
+      p.insideBall = false;
+    }
+  } else if (ball.state === 3) {
+    ball.timer += dt;
+    if (ball.timer >= 1.1) { ball.state = 0; ball.targetIdx = -1; }
+  }
+}
+
+// Eventos de Toque / Mouse (Swipe para arremessar Pokébola ou girar câmera)
+let dragStart = null;
+canvas.addEventListener("pointerdown", (e) => {
+  dragStart = { x: e.clientX, y: e.clientY, t: performance.now() };
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!dragStart || e.buttons === 0) return;
+  const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+  if (!hasImu && Math.abs(dx) > Math.abs(dy)) {
+    pose.yaw -= dx * 0.005;
+    dragStart.x = e.clientX;
+  }
+});
+canvas.addEventListener("pointerup", (e) => {
+  if (!dragStart) return;
+  const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+  const dtMs = Math.max(16, performance.now() - dragStart.t);
+  if (dy < -35 && dtMs < 650) {
+    const speed = Math.min(10.5, Math.max(5.8, (-dy / dtMs) * 7.5));
+    const yawOff = (dx / window.innerWidth) * 0.55;
+    throwPokeball(speed, 0.34, yawOff);
+  }
+  dragStart = null;
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === " ") throwPokeball();
+  else if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft") pose.yaw -= 0.10;
+  else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") pose.yaw += 0.10;
+  else if (e.key === "w" || e.key === "W" || e.key === "ArrowUp") {
+    pose.pos.x += Math.sin(pose.yaw)*0.25; pose.pos.z -= Math.cos(pose.yaw)*0.25;
+  } else if (e.key === "s" || e.key === "S" || e.key === "ArrowDown") {
+    pose.pos.x -= Math.sin(pose.yaw)*0.25; pose.pos.z += Math.cos(pose.yaw)*0.25;
+  } else if (e.key === "1") renderMode = 0;
+  else if (e.key === "2") renderMode = 1;
+  else if (e.key === "3") renderMode = 2;
+});
+
+document.getElementById("btn-throw").addEventListener("click", () => throwPokeball());
+document.getElementById("btn-mode").addEventListener("click", (e) => {
+  renderMode = (renderMode + 1) % 3;
+  const labels = ["1:ASCII-3D", "2:Half-Block", "3:Braille"];
+  e.target.textContent = "Modo: " + labels[renderMode];
+});
+document.getElementById("btn-cam").addEventListener("click", toggleCamera);
+document.getElementById("btn-imu").addEventListener("click", enableImuSensors);
+document.getElementById("btn-reset").addEventListener("click", () => {
+  pose.pos = vec3(0,0,0); pose.yaw = 0; pose.pitch = 0.05; imuBaseAlpha = null;
+  setBanner("Âncora 3D do ambiente recalibrada para a direção atual!");
+});
+
+// ============================================================================
+// LOOP PRINCIPAL DE TEMPO REAL (60 FPS)
+// ============================================================================
+let prevTime = performance.now();
+function frameLoop(now) {
+  const dt = Math.min(0.05, Math.max(0.001, (now - prevTime) / 1000));
+  prevTime = now;
+  const timeSec = now / 1000;
+
+  captureAndComputeSobel(timeSec);
+  updateAdaptiveTracker(dt);
+  updateGamePhysics(dt, timeSec);
+  const { gw, gh } = rasterizeScene(timeSec);
+  renderAsciiFrame(gw, gh);
+  drawRadar();
+
+  // Atualiza HUD
+  const govNames = ["ULTRA", "BALANCED", "ECO-LIGHT"];
+  document.getElementById("tier-badge").textContent = `Track: ${pose.tier} (${pose.trackedCount} pts)`;
+  document.getElementById("gov-badge").textContent = `Gov: ${govNames[qualityProfile]}`;
+  document.getElementById("fps-badge").textContent = `${Math.round(1000 / Math.max(1, emaFrameMs))} FPS`;
+  document.getElementById("dex-badge").textContent = `Pokédex: ${totalCaptured}`;
+
+  // Pokémon na mira
+  const fwd = { x: Math.sin(pose.yaw), z: -Math.cos(pose.yaw) };
+  let bestAng = 99, bestP = pokemons[0], bestDist = 0;
+  for (const p of pokemons) {
+    const dx = p.pos.x - pose.pos.x, dz = p.pos.z - pose.pos.z;
+    const d = Math.hypot(dx, dz);
+    const ang = Math.acos(Math.max(-1, Math.min(1, (dx*fwd.x + dz*fwd.z) / Math.max(0.01, d))));
+    if (ang < bestAng) { bestAng = ang; bestP = p; bestDist = d; }
+  }
+  document.getElementById("target-badge").textContent =
+    `Mira: ${SPECIES_NAMES[bestP.species]} (${bestDist.toFixed(1)}m)`;
+
+  requestAnimationFrame(frameLoop);
+}
+requestAnimationFrame(frameLoop);
+</script>
+</body>
+</html>
