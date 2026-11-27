@@ -191,7 +191,7 @@ window.PokeGameUI = (function() {
 
   // Escalador Dinâmico de FPS
   let fpsFrames = 0, fpsLastTime = performance.now(), currentFps = 60;
-  let qualityTier = 2; // 1 = Ultra-Low, 2 = Balanced HD, 3 = Ultra-Sharp ASCII
+  let qualityTier = 3; // Inicia direto em 3 = Ultra-Sharp Micro-ASCII 5x7px (auto-escala se FPS < 24)
 
   function allocateAsciiBuffers(c, r) {
     cols = c; rows = r;
@@ -215,19 +215,38 @@ window.PokeGameUI = (function() {
     gbLight = new Float32Array(n);
   }
 
+  // Tabela LUT RGB 15-bit pré-computada (Zero alocação de strings em 60 FPS!)
+  const RGB_LUT = new Array(32768);
+  for (let r = 0; r < 32; ++r) {
+    const rr = (r << 3) | (r >> 2);
+    for (let g = 0; g < 32; ++g) {
+      const gg = (g << 3) | (g >> 2);
+      for (let b = 0; b < 32; ++b) {
+        const bb = (b << 3) | (b >> 2);
+        RGB_LUT[(r << 10) | (g << 5) | b] = `rgb(${rr},${gg},${bb})`;
+      }
+    }
+  }
+  function fastRgb(r, g, b) {
+    const qr = Math.max(0, Math.min(31, r >> 3));
+    const qg = Math.max(0, Math.min(31, g >> 3));
+    const qb = Math.max(0, Math.min(31, b >> 3));
+    return RGB_LUT[(qr << 10) | (qg << 5) | qb];
+  }
+
   function resizeViewport() {
     if (!canvas) return;
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    // Células ASCII de Alta Densidade (Mais que o dobro de resolução para máxima clareza 3D!)
-    const targetCellW = qualityTier === 3 ? 6 : (qualityTier === 2 ? 7 : 9);
-    const targetCellH = Math.round(targetCellW * 1.38);
+    // Células Ultra-HD (5x7 no Tier 3, 6x8 no Tier 2) para definição máxima em ASCII 3D!
+    const targetCellW = qualityTier === 3 ? 5 : (qualityTier === 2 ? 6 : 8);
+    const targetCellH = Math.round(targetCellW * 1.34);
     cellW = targetCellW;
     cellH = targetCellH;
 
-    const newCols = Math.max(62, Math.min(230, Math.floor(canvas.width / cellW)));
-    const newRows = Math.max(42, Math.min(145, Math.floor(canvas.height / cellH)));
+    const newCols = Math.max(76, Math.min(260, Math.floor(canvas.width / cellW)));
+    const newRows = Math.max(52, Math.min(165, Math.floor(canvas.height / cellH)));
     allocateAsciiBuffers(newCols, newRows);
 
     if (sampleCanvas) {
@@ -867,6 +886,17 @@ window.PokeGameUI = (function() {
   // ============================================================================
   // ZOOM DO MAPA (DE 2.5m ATÉ 55.0m PARA VISÃO ESTRATÉGICA AMPLA!)
   // ============================================================================
+  // Alternador Manual de Nivel de Detalhe ASCII (Normal HD / Ultra-Sharp 3D / Extreme Micro-ASCII)
+  function cycleAsciiDetailTier() {
+    window.PokeAudio.playUiClick();
+    qualityTier = qualityTier >= 3 ? 2 : (qualityTier + 1);
+    resizeViewport();
+    const lbl = qualityTier === 3 ? "ULTRA-HD (Micro-ASCII 5x6px)" : "HD (Alta Definicao 6x8px)";
+    const btn = document.getElementById("btn-hd-tier");
+    if (btn) btn.textContent = qualityTier === 3 ? "UHD" : "HD";
+    window.PokeStorage.showToast(`[GRAFICOS] Resolucao ASCII 3D ajustada para ${lbl} (${cols}x${rows} celulas)!`, "success");
+  }
+
   function adjustZoom(deltaDist) {
     if (gameScene !== "CITY_MAP") return;
     cityState.camOrbitDist = Math.max(2.5, Math.min(55.0, cityState.camOrbitDist + deltaDist));
@@ -1327,6 +1357,33 @@ window.PokeGameUI = (function() {
         drawCmds.push({ id: 11, mesh: bMesh, model: mBuddy, speciesId: buddyMon.speciesId });
       }
 
+      // 3.5. EDIFÍCIOS ARQUITETÔNICOS 3D & ÁRVORES 3D NOS QUARTEIRÕES DA CIDADE
+      const blockBaseX = Math.floor(cityState.playerX / 12) * 12;
+      const blockBaseZ = Math.floor(cityState.playerZ / 12) * 12;
+      const treeMesh = E.buildCityTree3DMesh();
+      for (let bx = -2; bx <= 2; ++bx) {
+        for (let bz = -2; bz <= 2; ++bz) {
+          const cx = blockBaseX + bx * 12;
+          const cz = blockBaseZ + bz * 12;
+          // Não coloca prédio em cima do jogador ou muito longe
+          const dP = Math.hypot(cx - cityState.playerX, cz - cityState.playerZ);
+          if (dP < 5.2 || dP > 44.0) continue;
+          const bHash = Math.abs((Math.round(cx) * 73856093) ^ (Math.round(cz) * 19349663));
+          const bMesh = E.buildCityBuilding3DMesh(bHash % 3);
+          drawCmds.push({
+            id: 8,
+            mesh: bMesh,
+            model: E.mat4Translation(cx, -1.25, cz)
+          });
+          // Árvores 3D de calçada ao lado dos edifícios
+          drawCmds.push({
+            id: 9,
+            mesh: treeMesh,
+            model: E.mat4Translation(cx + 2.2, -1.25, cz + 2.2)
+          });
+        }
+      }
+
       // 4. POKÉSTOPS 3D
       cityState.pokestops.forEach((ps, idx) => {
         const dPlayer = Math.hypot(ps.x - cityState.playerX, ps.z - cityState.playerZ);
@@ -1723,7 +1780,8 @@ window.PokeGameUI = (function() {
   }
 
   // ============================================================================
-  // ESTÁGIO 3 DO PIPELINE 100% ASCII: RENDERIZAÇÃO DO GRID DE CARACTERES DE ALTA DEFINIÇÃO
+  // ESTÁGIO 3 DO PIPELINE 100% ASCII: RENDERIZAÇÃO DO GRID DE CARACTERES ULTRA-HD
+  // Usa Rampa Tipográfica de 24 Níveis + Vincos Anatômicos Sobel 3D + LUT RGB
   // ============================================================================
   function renderAsciiCanvas(timeSec) {
     ctx.fillStyle = "#081024";
@@ -1735,7 +1793,7 @@ window.PokeGameUI = (function() {
       fontLoaded = true;
     }
 
-    const shadeRamp = " .:-=+*#%@";
+    const shadeRamp = " .',:;!~+-=*oO08#%W@";
     const shadeLen = shadeRamp.length;
     const dirChars = [" ", "|", "-", "/", "\\"];
 
@@ -1760,7 +1818,6 @@ window.PokeGameUI = (function() {
             (r > 0 && gbId[i - cols] === 0) || (r < rows - 1 && gbId[i + cols] === 0);
 
           if (id === 7 || id === 2) {
-            // Anel 3D de Raio de Ação / Ancoragem no chão
             bgR = Math.floor(cr * 115);
             bgG = Math.floor(cg * 155);
             bgB = Math.floor(cb * 175);
@@ -1769,34 +1826,37 @@ window.PokeGameUI = (function() {
             fgB = Math.min(255, Math.floor(cb * 255 + 75));
             ch = (c + r) % 2 === 0 ? "o" : "+";
           } else if (isOuterSilhouette) {
-            // Contorno nítido de 1 célula usando a direção exata da borda Sobel 3D (| - / \)
-            bgR = Math.floor(cr * 95);
-            bgG = Math.floor(cg * 95);
-            bgB = Math.floor(cb * 110);
-            fgR = Math.min(255, Math.floor(cr * 255 + 90));
-            fgG = Math.min(255, Math.floor(cg * 255 + 90));
-            fgB = Math.min(255, Math.floor(cb * 255 + 90));
+            // Contorno de silhueta 3D de 1 célula com contraste nítido
+            bgR = Math.floor(cr * 82);
+            bgG = Math.floor(cg * 82);
+            bgB = Math.floor(cb * 96);
+            fgR = Math.min(255, Math.floor(cr * 255 + 95));
+            fgG = Math.min(255, Math.floor(cg * 255 + 95));
+            fgB = Math.min(255, Math.floor(cb * 255 + 95));
             ch = edgeDir[i] > 0 ? dirChars[edgeDir[i]] : "#";
           } else {
-            // Sombreamento 3D anatômico de alto contraste (preserva olhos, listras e volume 3D!)
-            bgR = Math.floor(cr * 215);
-            bgG = Math.floor(cg * 215);
-            bgB = Math.floor(cb * 215);
+            // Sombreamento 3D anatômico de 20 níveis + vincos internos Sobel 3D (olhos, boca, detalhes)
+            bgR = Math.floor(cr * 218);
+            bgG = Math.floor(cg * 218);
+            bgB = Math.floor(cb * 218);
 
-            fgR = Math.min(255, Math.floor(cr * 255 + 58));
-            fgG = Math.min(255, Math.floor(cg * 255 + 58));
-            fgB = Math.min(255, Math.floor(cb * 255 + 58));
-
-            if (edgeMag[i] > 0.72 && edgeDir[i] > 0) {
+            if (edgeMag[i] > 0.52 && edgeDir[i] > 0) {
+              // Vinco anatômico interno (olhos, listras, divisão de casco/asas)
+              fgR = Math.min(255, Math.floor(cr * 255 + 85));
+              fgG = Math.min(255, Math.floor(cg * 255 + 85));
+              fgB = Math.min(255, Math.floor(cb * 255 + 85));
               ch = dirChars[edgeDir[i]];
             } else {
+              fgR = Math.min(255, Math.floor(cr * 255 + 58));
+              fgG = Math.min(255, Math.floor(cg * 255 + 58));
+              fgB = Math.min(255, Math.floor(cb * 255 + 58));
               const luma = Math.min(1, 0.299 * cr + 0.587 * cg + 0.114 * cb);
               ch = shadeRamp[Math.min(shadeLen - 1, Math.max(1, Math.floor(luma * (shadeLen - 1))))];
             }
           }
         } else {
           // CÉLULA DO AMBIENTE 3D EM ASCII (Mapa GPS Pokémon GO, Câmera Ao Vivo, Estádio)
-          const cr = camR[i], cg = camG[i], cb = camB[i], luma = camLuma[i];
+          const cr = camR[i], cg = camG[i], cb = camB[i];
           const ct = camCellType[i];
           bgR = Math.floor(cr * 185);
           bgG = Math.floor(cg * 185);
@@ -1807,16 +1867,12 @@ window.PokeGameUI = (function() {
           fgB = Math.min(255, Math.floor(cb * 255 + 54));
 
           if (ct === 2) {
-            // Faixa central de avenida / linha de arena
             ch = "=";
           } else if (ct === 3) {
-            // Meio-fio salmão/dourado das ruas
             ch = "#";
           } else if (ct === 4) {
-            // Quarteirão de edifícios com padrão de janelas ASCII
             ch = ((r & 1) === 0 && (c & 1) === 0) ? "#" : ":";
           } else if (ct === 1) {
-            // Asfalto limpo para máximo contraste com os Pokémons 3D
             ch = "·";
           } else if (edgeMag[i] > 0.22 && edgeDir[i] > 0) {
             ch = dirChars[edgeDir[i]];
@@ -1825,10 +1881,10 @@ window.PokeGameUI = (function() {
           }
         }
 
-        ctx.fillStyle = `rgb(${bgR},${bgG},${bgB})`;
+        ctx.fillStyle = fastRgb(bgR, bgG, bgB);
         ctx.fillRect(px, py, cellW, cellH);
 
-        ctx.fillStyle = `rgb(${fgR},${fgG},${fgB})`;
+        ctx.fillStyle = fastRgb(fgR, fgG, fgB);
         ctx.fillText(ch, px, py);
       }
     }
@@ -4188,6 +4244,7 @@ window.PokeGameUI = (function() {
   return {
     toggleRealCamera,
     toggleSceneMode,
+    cycleAsciiDetailTier,
     adjustZoom,
     startRealGpsTracking,
     toggleNavModeOrResyncGps,

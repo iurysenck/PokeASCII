@@ -223,6 +223,16 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     const cellW = widthMeters / gridW;
     const cellH = heightMeters / gridH;
 
+    // Mapa de luminancia para Micro-Relevo Anatomico 3D (olhos, boca, listras, barriga e garras ganham relevo 3D real!)
+    const lumaField = new Float32Array(gridW * gridH);
+    for (let i = 0; i < gridW * gridH; ++i) {
+      if (!mask[i]) continue;
+      const r = rgbaData[i * 4 + 0] / 255;
+      const g = rgbaData[i * 4 + 1] / 255;
+      const b = rgbaData[i * 4 + 2] / 255;
+      lumaField[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+
     for (let y = 0; y < gridH; ++y) {
       for (let x = 0; x < gridW; ++x) {
         const i = y * gridW + x;
@@ -233,15 +243,23 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
         const b = rgbaData[i * 4 + 2] / 255;
         const col = vec3(r, g, b);
 
-        const normDist = Math.min(1.0, distField[i] / Math.max(1.5, maxD * 0.75));
-        const domeZ = maxDepthZ * Math.sqrt(Math.max(0.08, 1.0 - Math.pow(1.0 - normDist, 2)));
+        const normDist = Math.min(1.0, distField[i] / Math.max(1.5, maxD * 0.72));
+        const microRelief = 0.76 + 0.34 * lumaField[i];
+        const domeZ = maxDepthZ * Math.sqrt(Math.max(0.10, 1.0 - Math.pow(1.0 - normDist, 2))) * microRelief;
 
         const dLeft  = x > 0 ? distField[i - 1] : 0;
         const dRight = x + 1 < gridW ? distField[i + 1] : 0;
         const dUp    = y > 0 ? distField[i - gridW] : 0;
         const dDown  = y + 1 < gridH ? distField[i + gridW] : 0;
-        const nx = (dLeft - dRight) * 0.45;
-        const ny = (dDown - dUp) * 0.45;
+
+        const lLeft  = (x > 0 && mask[i - 1]) ? lumaField[i - 1] : lumaField[i];
+        const lRight = (x + 1 < gridW && mask[i + 1]) ? lumaField[i + 1] : lumaField[i];
+        const lUp    = (y > 0 && mask[i - gridW]) ? lumaField[i - gridW] : lumaField[i];
+        const lDown  = (y + 1 < gridH && mask[i + gridW]) ? lumaField[i + gridW] : lumaField[i];
+
+        // Gradiente normal combina curvatura do corpo + vincos anatomicos internos (olhos, boca, detalhes)
+        const nx = (dLeft - dRight) * 0.38 + (lLeft - lRight) * 1.45;
+        const ny = (dDown - dUp) * 0.38 + (lDown - lUp) * 1.45;
         const frontNorm = norm3({ x: nx, y: ny, z: 1.0 });
         const backNorm  = norm3({ x: nx, y: ny, z: -1.0 });
 
@@ -293,6 +311,29 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
           );
           addQuad(m, br, br+1, br+2, br+3);
         }
+        // Face Superior e Inferior (Fecha 100% os voxels quando vistos de cima na camera do Mapa 3D!)
+        if (y === 0 || !mask[i - gridW]) {
+          const bu = m.verts.length;
+          const nU = vec3(0, 1, 0);
+          m.verts.push(
+            { pos: vec3(wx0, wy1, wzFront), norm: nU, uv: animW, col },
+            { pos: vec3(wx1, wy1, wzFront), norm: nU, uv: animW, col },
+            { pos: vec3(wx1, wy1, wzBack),  norm: nU, uv: animW, col },
+            { pos: vec3(wx0, wy1, wzBack),  norm: nU, uv: animW, col }
+          );
+          addQuad(m, bu, bu+1, bu+2, bu+3);
+        }
+        if (y === gridH - 1 || !mask[i + gridW]) {
+          const bd = m.verts.length;
+          const nD = vec3(0, -1, 0);
+          m.verts.push(
+            { pos: vec3(wx0, wy0, wzBack),  norm: nD, uv: animW, col },
+            { pos: vec3(wx1, wy0, wzBack),  norm: nD, uv: animW, col },
+            { pos: vec3(wx1, wy0, wzFront), norm: nD, uv: animW, col },
+            { pos: vec3(wx0, wy0, wzFront), norm: nD, uv: animW, col }
+          );
+          addQuad(m, bd, bd+1, bd+2, bd+3);
+        }
       }
     }
     return m;
@@ -310,7 +351,6 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
 
     img.onload = () => {
       try {
-        // 1. Recorta automaticamente as bordas transparentes do sprite 96x96 para máxima nitidez 3D!
         const rawC = document.createElement("canvas");
         rawC.width = img.width || 96;
         rawC.height = img.height || 96;
@@ -332,14 +372,15 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
         const cropW = Math.max(8, maxX - minX + 1);
         const cropH = Math.max(8, maxY - minY + 1);
 
-        const gridW = 42, gridH = 42;
+        // Grade Volumétrica 52x52 de Alta Definição (6 faces fechadas + micro-relevo 3D)
+        const gridW = 52, gridH = 52;
         const c = document.createElement("canvas");
         c.width = gridW; c.height = gridH;
         const cx = c.getContext("2d");
         cx.imageSmoothingEnabled = false;
         cx.drawImage(img, minX, minY, cropW, cropH, 1, 1, gridW - 2, gridH - 2);
         const imgData = cx.getImageData(0, 0, gridW, gridH).data;
-        const volMesh = buildVolumetricMeshFromPixelGrid(gridW, gridH, imgData, 1.65, 1.75, 0.62);
+        const volMesh = buildVolumetricMeshFromPixelGrid(gridW, gridH, imgData, 1.72, 1.82, 0.68);
         if (volMesh.verts.length > 40) {
           MESH_CACHE.set(key, volMesh);
           ASCII_PORTRAIT_CACHE.delete(`${key}_0`);
@@ -613,10 +654,20 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     const topCol = isCooldown ? vec3(0.66, 0.33, 0.97) : vec3(0.15, 0.88, 1.0);
     const poleCol = isCooldown ? vec3(0.48, 0.22, 0.78) : vec3(0.10, 0.48, 0.96);
     const wht = vec3(0.95, 0.99, 1.0);
-    appendEllipsoid(m, 0, 0.12, 0, 0.55, 0.12, 0.55, poleCol, 6, 12, 0);
-    appendBox(m, 0, 0.75, 0, 0.12, 0.75, 0.12, poleCol, 0);
-    appendBox(m, 0, 1.85, 0, 0.44, 0.44, 0.44, topCol, 0.8);
-    appendEllipsoid(m, 0, 1.85, 0, 0.68, 0.68, 0.12, wht, 8, 16, 0.5);
+    const dark = vec3(0.14, 0.22, 0.38);
+    // Pedestal escalonado 3D
+    appendEllipsoid(m, 0, 0.08, 0, 0.72, 0.08, 0.72, dark, 6, 14, 0);
+    appendEllipsoid(m, 0, 0.20, 0, 0.52, 0.10, 0.52, poleCol, 6, 14, 0);
+    appendEllipsoid(m, 0, 0.34, 0, 0.32, 0.08, 0.32, wht, 6, 12, 0);
+    // Coluna central com aneis luminosos
+    appendBox(m, 0, 0.92, 0, 0.13, 0.62, 0.13, poleCol, 0);
+    appendEllipsoid(m, 0, 0.85, 0, 0.24, 0.06, 0.24, wht, 5, 10, 0.2);
+    appendEllipsoid(m, 0, 1.25, 0, 0.24, 0.06, 0.24, topCol, 5, 10, 0.4);
+    // Anel Holografico Externo + Nucleo Cubico 3D + Antena Superior
+    appendEllipsoid(m, 0, 1.88, 0, 0.76, 0.76, 0.13, wht, 10, 18, 0.5);
+    appendEllipsoid(m, 0, 1.88, 0, 0.56, 0.56, 0.16, poleCol, 8, 16, 0.6);
+    appendBox(m, 0, 1.88, 0, 0.36, 0.36, 0.36, topCol, 0.8);
+    appendCone(m, 0, 2.58, 0, 0, 3.05, 0, 0.12, topCol, wht, 0.9);
     recomputeNormals(m);
     MESH_CACHE.set(key, m);
     return m;
@@ -629,11 +680,24 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     const m = createMesh();
     const teamCol = vec3(c[0], c[1], c[2]);
     const slv = vec3(0.78, 0.84, 0.92);
-    appendEllipsoid(m, 0, 0.45, 0, 0.92, 0.45, 0.92, slv, 8, 14, 0);
-    appendBox(m, 0, 1.40, 0, 0.40, 0.90, 0.40, slv, 0.2);
-    appendEllipsoid(m, 0, 2.45, 0, 1.15, 0.35, 1.15, teamCol, 8, 16, 0.6);
-    appendCone(m, -0.82, 2.55, 0, -1.05, 3.25, 0, 0.18, teamCol, slv, 0.9);
-    appendCone(m,  0.82, 2.55, 0,  1.05, 3.25, 0, 0.18, teamCol, slv, 0.9);
+    const dark = vec3(0.22, 0.28, 0.38);
+    const wht = vec3(0.96, 0.98, 1.0);
+    // Base de Coliseu em 3 aneis
+    appendEllipsoid(m, 0, 0.18, 0, 1.25, 0.18, 1.25, dark, 8, 16, 0);
+    appendEllipsoid(m, 0, 0.48, 0, 0.96, 0.28, 0.96, slv, 8, 16, 0);
+    appendEllipsoid(m, 0, 0.78, 0, 0.75, 0.15, 0.75, teamCol, 8, 16, 0.2);
+    // 4 Pilares inclinados de sustentacao do estadio + nucleo energetico
+    appendBox(m,  0.00, 1.55,  0.00, 0.36, 0.85, 0.36, slv, 0.2);
+    appendBox(m, -0.52, 1.45, -0.52, 0.12, 0.85, 0.12, teamCol, 0.3);
+    appendBox(m,  0.52, 1.45, -0.52, 0.12, 0.85, 0.12, teamCol, 0.3);
+    appendBox(m, -0.52, 1.45,  0.52, 0.12, 0.85, 0.12, teamCol, 0.3);
+    appendBox(m,  0.52, 1.45,  0.52, 0.12, 0.85, 0.12, teamCol, 0.3);
+    // Plataforma Superior de Batalha + Torres de Cristal da Equipe
+    appendEllipsoid(m, 0, 2.42, 0, 1.28, 0.28, 1.28, teamCol, 10, 18, 0.6);
+    appendEllipsoid(m, 0, 2.62, 0, 1.02, 0.16, 1.02, wht, 8, 16, 0.7);
+    appendCone(m, -0.92, 2.55, 0, -1.18, 3.45, 0, 0.20, teamCol, wht, 0.9);
+    appendCone(m,  0.92, 2.55, 0,  1.18, 3.45, 0, 0.20, teamCol, wht, 0.9);
+    appendCone(m, 0, 2.55, -0.92, 0, 3.35, -1.15, 0.16, slv, teamCol, 0.9);
     recomputeNormals(m);
     MESH_CACHE.set(key, m);
     return m;
@@ -651,6 +715,44 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     return m;
   }
 
+  // Edificios Arquitetonicos 3D e Arvores 3D para dar volume urbano real ao Mapa GPS!
+  function buildCityBuilding3DMesh(variant = 0) {
+    const key = `city_bldg_${variant}`;
+    if (MESH_CACHE.has(key)) return MESH_CACHE.get(key);
+    const m = createMesh();
+    const wall = variant % 2 === 0 ? vec3(0.26, 0.36, 0.64) : vec3(0.22, 0.32, 0.58);
+    const roof = vec3(0.36, 0.48, 0.78);
+    const win  = vec3(0.55, 0.82, 0.98);
+    const h = 1.35 + (variant % 3) * 0.55;
+    // Corpo principal do predio + cornija do telhado + faixas de janelas iluminadas
+    appendBox(m, 0, h * 0.5, 0, 1.05, h * 0.5, 1.05, wall, 0);
+    appendBox(m, 0, h + 0.06, 0, 1.12, 0.06, 1.12, roof, 0);
+    appendBox(m, 0.25, h + 0.22, -0.20, 0.24, 0.16, 0.24, roof, 0);
+    for (let fl = 0.45; fl < h - 0.2; fl += 0.55) {
+      appendBox(m, 0, fl,  1.06, 0.78, 0.12, 0.02, win, 0);
+      appendBox(m, 0, fl, -1.06, 0.78, 0.12, 0.02, win, 0);
+      appendBox(m,  1.06, fl, 0, 0.02, 0.12, 0.78, win, 0);
+      appendBox(m, -1.06, fl, 0, 0.02, 0.12, 0.78, win, 0);
+    }
+    recomputeNormals(m);
+    MESH_CACHE.set(key, m);
+    return m;
+  }
+
+  function buildCityTree3DMesh() {
+    if (MESH_CACHE.has("city_tree")) return MESH_CACHE.get("city_tree");
+    const m = createMesh();
+    const trunk = vec3(0.45, 0.30, 0.18);
+    const leaf1 = vec3(0.16, 0.68, 0.48);
+    const leaf2 = vec3(0.24, 0.84, 0.58);
+    appendBox(m, 0, 0.35, 0, 0.12, 0.35, 0.12, trunk, 0);
+    appendCone(m, 0, 0.55, 0, 0, 1.45, 0, 0.58, leaf1, leaf2, 0.3);
+    appendCone(m, 0, 1.05, 0, 0, 1.85, 0, 0.44, leaf1, leaf2, 0.6);
+    recomputeNormals(m);
+    MESH_CACHE.set("city_tree", m);
+    return m;
+  }
+
   // ============================================================================
   // GERADOR DE RETRATOS 100% ASCII 3D DE ALTA DEFINIÇÃO (36x34 CÉLULAS ASCII)
   // Usa rampa de sombreamento anatômico (@ # % * + = - : .) + Sobel 3D!
@@ -660,8 +762,8 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     if (ASCII_PORTRAIT_CACHE.has(cacheKey)) return ASCII_PORTRAIT_CACHE.get(cacheKey);
 
     const mesh = getPokemonMesh(speciesId, isShiny);
-    const gw = 34, gh = 32;
-    const cellW = 4, cellH = 5;
+    const gw = 44, gh = 42;
+    const cellW = 3, cellH = 4;
     const c = document.createElement("canvas");
     c.width = gw * cellW;
     c.height = gh * cellH;
@@ -848,6 +950,8 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     buildPokestop3DMesh,
     buildGymTower3DMesh,
     buildVillainBalloon3DMesh,
+    buildCityBuilding3DMesh,
+    buildCityTree3DMesh,
     getPokemonCardImageSrc,
     startCameraOnVideoElement
   };
