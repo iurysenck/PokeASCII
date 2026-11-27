@@ -563,30 +563,36 @@ window.Ascii3DEngine = (function() {
     return recomputeNormals(m);
   }
 
-  function buildPokestop3DMesh() {
-    if (MESH_CACHE.has("poi_pokestop")) return MESH_CACHE.get("poi_pokestop");
+  function buildPokestop3DMesh(isCooldown = false) {
+    const key = isCooldown ? "poi_pokestop_cd" : "poi_pokestop_ready";
+    if (MESH_CACHE.has(key)) return MESH_CACHE.get(key);
     const m = createMesh();
-    const cyan = vec3(0.15, 0.88, 1.0), blue = vec3(0.10, 0.48, 0.96), wht = vec3(0.95, 0.99, 1.0);
-    appendEllipsoid(m, 0, 0.12, 0, 0.55, 0.12, 0.55, blue, 6, 12, 0);
-    appendBox(m, 0, 0.75, 0, 0.12, 0.75, 0.12, blue, 0);
-    appendBox(m, 0, 1.85, 0, 0.44, 0.44, 0.44, cyan, 0.8);
+    const topCol = isCooldown ? vec3(0.66, 0.33, 0.97) : vec3(0.15, 0.88, 1.0);
+    const poleCol = isCooldown ? vec3(0.48, 0.22, 0.78) : vec3(0.10, 0.48, 0.96);
+    const wht = vec3(0.95, 0.99, 1.0);
+    appendEllipsoid(m, 0, 0.12, 0, 0.55, 0.12, 0.55, poleCol, 6, 12, 0);
+    appendBox(m, 0, 0.75, 0, 0.12, 0.75, 0.12, poleCol, 0);
+    appendBox(m, 0, 1.85, 0, 0.44, 0.44, 0.44, topCol, 0.8);
     appendEllipsoid(m, 0, 1.85, 0, 0.68, 0.68, 0.12, wht, 8, 16, 0.5);
     recomputeNormals(m);
-    MESH_CACHE.set("poi_pokestop", m);
+    MESH_CACHE.set(key, m);
     return m;
   }
 
-  function buildGymTower3DMesh() {
-    if (MESH_CACHE.has("poi_gym")) return MESH_CACHE.get("poi_gym");
+  function buildGymTower3DMesh(teamColArr) {
+    const c = teamColArr || [1.0, 0.84, 0.20];
+    const key = `poi_gym_${c[0].toFixed(2)}_${c[1].toFixed(2)}_${c[2].toFixed(2)}`;
+    if (MESH_CACHE.has(key)) return MESH_CACHE.get(key);
     const m = createMesh();
-    const gold = vec3(1.0, 0.84, 0.20), slv = vec3(0.78, 0.84, 0.92), red = vec3(0.96, 0.22, 0.26);
+    const teamCol = vec3(c[0], c[1], c[2]);
+    const slv = vec3(0.78, 0.84, 0.92);
     appendEllipsoid(m, 0, 0.45, 0, 0.92, 0.45, 0.92, slv, 8, 14, 0);
     appendBox(m, 0, 1.40, 0, 0.40, 0.90, 0.40, slv, 0.2);
-    appendEllipsoid(m, 0, 2.45, 0, 1.15, 0.35, 1.15, gold, 8, 16, 0.6);
-    appendCone(m, -0.82, 2.55, 0, -1.05, 3.25, 0, 0.18, red, gold, 0.9);
-    appendCone(m,  0.82, 2.55, 0,  1.05, 3.25, 0, 0.18, red, gold, 0.9);
+    appendEllipsoid(m, 0, 2.45, 0, 1.15, 0.35, 1.15, teamCol, 8, 16, 0.6);
+    appendCone(m, -0.82, 2.55, 0, -1.05, 3.25, 0, 0.18, teamCol, slv, 0.9);
+    appendCone(m,  0.82, 2.55, 0,  1.05, 3.25, 0, 0.18, teamCol, slv, 0.9);
     recomputeNormals(m);
-    MESH_CACHE.set("poi_gym", m);
+    MESH_CACHE.set(key, m);
     return m;
   }
 

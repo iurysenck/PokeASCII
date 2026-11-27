@@ -90,6 +90,16 @@ window.PokeAudio = (function() {
     playTone(720, 960, 0.05, "sine", 0.08, 0);
   }
 
+  function playTransitionShutter() {
+    playTone(300, 740, 0.14, "sine", 0.10, 0);
+    playTone(740, 420, 0.12, "triangle", 0.08, 0.10);
+  }
+
+  function playBerryFeed() {
+    playTone(520, 680, 0.09, "sine", 0.11, 0);
+    playTone(680, 920, 0.14, "triangle", 0.12, 0.09);
+  }
+
   function playAttack(isCharged = false) {
     if (isCharged) {
       playTone(180, 880, 0.25, "sawtooth", 0.18, 0);
@@ -141,6 +151,8 @@ window.PokeAudio = (function() {
     playGotchaFanfare,
     playBreakout,
     playUiClick,
+    playTransitionShutter,
+    playBerryFeed,
     playAttack,
     toggleSound,
     toggleBgm,
@@ -280,6 +292,10 @@ window.PokeStorage = (function() {
       ],
       researchStamps: 3,
       specialResearchStage: 1,
+      starterChosen: false,
+      starterWalkAwayCount: 0,
+      dailyDefenderCoinsEarned: 0,
+      seenGuides: {},
       tasksProgress: {
         caught: 1,
         throws: 0,
@@ -365,6 +381,7 @@ window.PokeStorage = (function() {
       profile.avatar = Object.assign(def.avatar, loaded.avatar || {});
       profile.stats = Object.assign(def.stats, loaded.stats || {});
       profile.tasksProgress = Object.assign(def.tasksProgress, loaded.tasksProgress || {});
+      profile.seenGuides = Object.assign({}, loaded.seenGuides || {});
       if (!Array.isArray(profile.eggs) || profile.eggs.length === 0) {
         profile.eggs = def.eggs;
       }

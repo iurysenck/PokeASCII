@@ -417,9 +417,56 @@
     border-left: 5px solid #26ccaa; border-radius: 12px;
     padding: 10px 14px; font-size: 12px; font-weight: 800;
     box-shadow: 0 6px 20px rgba(0,0,0,0.28);
+    animation: slideUp 0.25s cubic-bezier(0.22, 1, 0.36, 1);
   }
   .toast-warn { border-left-color: #f59e0b; }
 
+  /* Transição Cinematográfica Entre Telas (Obturador / Iris Pokébola) */
+  #scene-transition-overlay {
+    position: fixed; inset: 0; pointer-events: none; z-index: 80;
+    background: radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(28,140,130,0.96) 45%, rgba(15,23,42,0.98) 100%);
+    opacity: 0; transform: scale(1.25);
+    transition: opacity 0.26s cubic-bezier(0.22, 1, 0.36, 1), transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+    display: flex; align-items: center; justify-content: center;
+    color: #ffffff; font-size: 20px; font-weight: 900; letter-spacing: 1.5px;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  }
+  #scene-transition-overlay.active {
+    opacity: 1; transform: scale(1.0);
+  }
+
+  /* Guia Contextual Interativo (Professor Willow & Líderes Spark / Blanche / Candela) */
+  #guide-banner-overlay {
+    position: fixed; bottom: 88px; left: 50%; transform: translateX(-50%);
+    width: 92%; max-width: 440px; z-index: 55;
+    background: linear-gradient(135deg, rgba(255,255,255,0.98), rgba(232,250,244,0.98));
+    border: 2.5px solid #24c8a8; border-radius: 18px;
+    padding: 12px 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.42);
+    display: none; align-items: center; gap: 12px;
+    animation: slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .guide-avatar {
+    width: 52px; height: 52px; border-radius: 50%;
+    background: linear-gradient(135deg, #1c8c82, #26ccaa);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px; flex-shrink: 0; border: 2px solid #ffffff;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+  }
+
+  /* Cascata Orbital nos Botões do Menu Radial */
+  #pogo-radial-menu .radial-item {
+    animation: radialPopIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  #pogo-radial-menu .radial-item:nth-child(1) { animation-delay: 0.02s; }
+  #pogo-radial-menu .radial-item:nth-child(3) { animation-delay: 0.05s; }
+  #pogo-radial-menu .radial-item:nth-child(5) { animation-delay: 0.08s; }
+  #pogo-radial-menu .radial-item:nth-child(7) { animation-delay: 0.11s; }
+  #pogo-radial-menu .radial-item:nth-child(9) { animation-delay: 0.14s; }
+
+  @keyframes radialPopIn {
+    from { opacity: 0; transform: translateY(36px) scale(0.65); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes slideUp { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 </style>
@@ -429,18 +476,20 @@
 <video id="cam-video" playsinline webkit-playsinline muted autoplay></video>
 <canvas id="ascii-canvas"></canvas>
 <div id="toast-container"></div>
+<div id="scene-transition-overlay"></div>
+<div id="guide-banner-overlay"></div>
 <input type="file" id="import-file-inp" accept=".json" style="display:none"/>
 
 <!-- ==================== HUD DO MAPA 3D DA CIDADE (Ref: 22.18.13 (2).jpeg) ==================== -->
 <div id="map-overworld-hud">
-  <div id="gps-pill" onclick="window.PokeGameUI.startRealGpsTracking(true)" title="Toque para atualizar seu GPS real">
-    📍 Localizando sua rua...
+  <div id="gps-pill" onclick="window.PokeGameUI.toggleNavModeOrResyncGps()" title="Toque para alternar entre GPS Live e Joystick Livre">
+    🛰️ GPS LIVE • Localizando sua rua...
   </div>
 
   <div id="right-floating-tools">
     <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(-3.2)" title="Aumentar Zoom (+)">＋</div>
     <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(3.2)" title="Diminuir Zoom (-)">－</div>
-    <div class="circle-tool-btn" onclick="window.PokeGameUI.startRealGpsTracking(true)" title="Centralizar no meu GPS Real">🧭</div>
+    <div class="circle-tool-btn" id="btn-nav-mode" onclick="window.PokeGameUI.toggleNavModeOrResyncGps()" title="Alternar GPS Live / Joystick Livre">🛰️</div>
   </div>
 
   <div id="joystick-zone" title="Arraste para caminhar pelas ruas da sua cidade">
