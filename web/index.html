@@ -469,6 +469,208 @@
   }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes slideUp { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+  /* ============================================================================
+     MODO INTERFACE 100% ASCII TERMINAL (ATIVÁVEL / DESATIVÁVEL COM 1 CLIQUE)
+     Mantém 100% de legibilidade e toque/clique com estética Box-Drawing ASCII!
+     ============================================================================ */
+  body.ascii-ui-mode,
+  body.ascii-ui-mode button,
+  body.ascii-ui-mode input,
+  body.ascii-ui-mode select,
+  body.ascii-ui-mode div,
+  body.ascii-ui-mode span {
+    font-family: 'Cascadia Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace !important;
+  }
+  body.ascii-ui-mode #gps-pill {
+    background: rgba(6, 13, 28, 0.94) !important;
+    color: #38bdf8 !important;
+    border: 1.5px dashed #26ccaa !important;
+    border-radius: 0 !important;
+    box-shadow: 3px 3px 0 rgba(38, 204, 170, 0.35) !important;
+  }
+  body.ascii-ui-mode #gps-pill::before { content: "+-[ "; color: #26ccaa; }
+  body.ascii-ui-mode #gps-pill::after  { content: " ]-+"; color: #26ccaa; }
+
+  body.ascii-ui-mode .circle-tool-btn,
+  body.ascii-ui-mode .ar-top-left-flee,
+  body.ascii-ui-mode .ar-top-right-cam,
+  body.ascii-ui-mode .ar-bottom-left-berry,
+  body.ascii-ui-mode .ar-bottom-right-ball,
+  body.ascii-ui-mode #research-binoculars-btn {
+    border-radius: 0 !important;
+    background: rgba(6, 14, 30, 0.94) !important;
+    color: #26ccaa !important;
+    border: 1.5px solid #26ccaa !important;
+    box-shadow: 3px 3px 0 rgba(28, 140, 130, 0.65) !important;
+  }
+  body.ascii-ui-mode .circle-tool-btn svg,
+  body.ascii-ui-mode .ar-top-left-flee svg,
+  body.ascii-ui-mode #research-binoculars-btn svg {
+    stroke: #26ccaa !important;
+  }
+  body.ascii-ui-mode #btn-ascii-ui-mode {
+    background: #26ccaa !important;
+    color: #06101e !important;
+    border-color: #ffffff !important;
+  }
+  body.ascii-ui-mode #joystick-zone {
+    border-radius: 0 !important;
+    background: rgba(6, 14, 30, 0.72) !important;
+    border: 1.5px dashed #38bdf8 !important;
+  }
+  body.ascii-ui-mode #joystick-knob {
+    border-radius: 0 !important;
+    background: #06101e !important;
+    border: 2px solid #26ccaa !important;
+    display: flex; align-items: center; justify-content: center;
+  }
+  body.ascii-ui-mode #joystick-knob::after {
+    content: "+"; color: #26ccaa; font-size: 16px; font-weight: 900;
+  }
+  body.ascii-ui-mode .avatar-bubble,
+  body.ascii-ui-mode .buddy-bubble,
+  body.ascii-ui-mode #nearby-pill {
+    border-radius: 0 !important;
+    background: rgba(6, 14, 30, 0.94) !important;
+    border: 1.5px solid #38bdf8 !important;
+    box-shadow: 3px 3px 0 rgba(56, 189, 248, 0.4) !important;
+  }
+  body.ascii-ui-mode .level-badge {
+    border-radius: 0 !important;
+    background: #06101e !important;
+    color: #26ccaa !important;
+    border: 1px solid #26ccaa !important;
+  }
+  body.ascii-ui-mode #center-pokeball-btn {
+    border-radius: 0 !important;
+    background: #06101e !important;
+    border: 2px double #ff4d4d !important;
+    box-shadow: 4px 4px 0 rgba(255, 77, 77, 0.45) !important;
+    width: 68px !important; height: 48px !important;
+  }
+  body.ascii-ui-mode #center-pokeball-btn::after {
+    content: "[-(O)-]" !important;
+    width: auto !important; height: auto !important;
+    border: none !important; border-radius: 0 !important;
+    background: transparent !important;
+    color: #ff6b6b !important; font-size: 12px; font-weight: 900;
+  }
+  body.ascii-ui-mode #pogo-radial-menu {
+    background: rgba(5, 11, 24, 0.94) !important;
+  }
+  body.ascii-ui-mode .radial-circle,
+  body.ascii-ui-mode .settings-icon-circle {
+    border-radius: 0 !important;
+    background: #08152c !important;
+    border: 1.5px dashed #26ccaa !important;
+    box-shadow: 4px 4px 0 rgba(38, 204, 170, 0.35) !important;
+  }
+  body.ascii-ui-mode .radial-circle svg,
+  body.ascii-ui-mode .settings-icon-circle svg {
+    stroke: #26ccaa !important;
+  }
+  body.ascii-ui-mode .radial-item span.label,
+  body.ascii-ui-mode .settings-link {
+    color: #38bdf8 !important;
+  }
+  body.ascii-ui-mode .radial-item span.label::before { content: "["; color: #26ccaa; }
+  body.ascii-ui-mode .radial-item span.label::after  { content: "]"; color: #26ccaa; }
+
+  body.ascii-ui-mode .pogo-close-x {
+    border-radius: 0 !important;
+    background: #06101e !important;
+    color: #ff6b6b !important;
+    border: 2px solid #ff6b6b !important;
+    box-shadow: 3px 3px 0 rgba(255, 107, 107, 0.4) !important;
+    width: 64px !important; height: 40px !important;
+    font-size: 15px !important; font-weight: 900 !important;
+  }
+  body.ascii-ui-mode .pogo-close-x::before { content: "[ "; }
+  body.ascii-ui-mode .pogo-close-x::after  { content: " ]"; }
+
+  body.ascii-ui-mode .modal-window,
+  body.ascii-ui-mode .onboarding-card {
+    background: #061020 !important;
+    color: #e2f8f0 !important;
+    border-radius: 0 !important;
+    border: 2px double #26ccaa !important;
+    box-shadow: 0 0 0 3px #061020, 0 0 32px rgba(38, 204, 170, 0.35) !important;
+  }
+  body.ascii-ui-mode .modal-header {
+    background: #091932 !important;
+    border-bottom: 1.5px dashed #26ccaa !important;
+  }
+  body.ascii-ui-mode #modal-title {
+    color: #26ccaa !important;
+  }
+  body.ascii-ui-mode #modal-title::before { content: "╔══ [ "; color: #38bdf8; }
+  body.ascii-ui-mode #modal-title::after  { content: " ] ══╗"; color: #38bdf8; }
+
+  body.ascii-ui-mode .pogo-white-card,
+  body.ascii-ui-mode .pogo-mon-cell,
+  body.ascii-ui-mode .pogo-region-banner,
+  body.ascii-ui-mode #guide-banner-overlay,
+  body.ascii-ui-mode .toast {
+    background: #09172e !important;
+    color: #e2f8f0 !important;
+    border-radius: 0 !important;
+    border: 1.5px dashed #26ccaa !important;
+    box-shadow: 3px 3px 0 rgba(38, 204, 170, 0.25) !important;
+  }
+  body.ascii-ui-mode .pogo-mon-cell.shiny {
+    border: 1.5px solid #facc15 !important;
+    background: #141b24 !important;
+  }
+  body.ascii-ui-mode .pogo-cp-top,
+  body.ascii-ui-mode .stat-cap-lbl,
+  body.ascii-ui-mode .pogo-region-sub {
+    color: #7dd3fc !important;
+  }
+  body.ascii-ui-mode .pogo-cp-top b,
+  body.ascii-ui-mode .pogo-mon-name,
+  body.ascii-ui-mode .stat-cap-val,
+  body.ascii-ui-mode .pogo-region-title,
+  body.ascii-ui-mode .modal-window h2,
+  body.ascii-ui-mode .modal-window h3,
+  body.ascii-ui-mode .modal-window h4,
+  body.ascii-ui-mode .modal-window b,
+  body.ascii-ui-mode .modal-window div,
+  body.ascii-ui-mode .modal-window p {
+    color: #e2f8f0 !important;
+  }
+  body.ascii-ui-mode .pogo-search-bar,
+  body.ascii-ui-mode .form-group input,
+  body.ascii-ui-mode .form-group select {
+    background: #040b17 !important;
+    color: #26ccaa !important;
+    border: 1.5px solid #26ccaa !important;
+    border-radius: 0 !important;
+  }
+  body.ascii-ui-mode .pogo-pill-btn {
+    border-radius: 0 !important;
+    background: #092238 !important;
+    color: #26ccaa !important;
+    border: 1.5px solid #26ccaa !important;
+    box-shadow: 3px 3px 0 rgba(38, 204, 170, 0.45) !important;
+  }
+  body.ascii-ui-mode .pogo-pill-btn::before { content: "[ "; color: #38bdf8; }
+  body.ascii-ui-mode .pogo-pill-btn::after  { content: " ]"; color: #38bdf8; }
+  body.ascii-ui-mode .pogo-pill-btn.secondary {
+    background: #061020 !important;
+    color: #7dd3fc !important;
+    border-color: #38bdf8 !important;
+  }
+  body.ascii-ui-mode .pogo-hp-line {
+    border-radius: 0 !important;
+    height: 6px !important;
+    background: repeating-linear-gradient(90deg, #26ccaa 0 5px, #061020 5px 7px) !important;
+  }
+  body.ascii-ui-mode .nearby-blue-disc {
+    border-radius: 0 !important;
+    border: 1.5px dashed #38bdf8 !important;
+    background: #091932 !important;
+  }
 </style>
 </head>
 <body>
@@ -497,6 +699,7 @@
       <svg viewBox="0 0 24 24" width="19" height="19" stroke="currentColor" stroke-width="2.2" fill="none"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>
     </div>
     <div class="circle-tool-btn" id="btn-hd-tier" onclick="window.PokeGameUI.cycleAsciiDetailTier()" title="Alternar Detalhe ASCII (HD / ULTRA-HD)" style="font-size:11px;font-weight:900;">UHD</div>
+    <div class="circle-tool-btn" id="btn-ascii-ui-mode" onclick="window.PokeGameUI.toggleAsciiUiMode()" title="Ativar/Desativar Interface de Menus em ASCII Terminal" style="font-size:9px;font-weight:900;letter-spacing:-0.4px;">ASCII</div>
   </div>
 
   <div id="joystick-zone" title="Arraste para caminhar pelas ruas da sua cidade">
@@ -589,6 +792,10 @@
       <div class="settings-icon-circle">
         <svg viewBox="0 0 24 24" width="18" height="18" stroke="#1c7870" stroke-width="2.2" fill="none"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><line x1="12" y1="12" x2="19" y2="5"/></svg>
       </div>
+    </div>
+    <div class="settings-link" onclick="window.PokeGameUI.toggleAsciiUiMode()">
+      <span id="radial-ascii-ui-lbl">MENUS: MODO ASCII</span>
+      <div class="settings-icon-circle" style="font-size:11px;font-weight:900;">[T]</div>
     </div>
   </div>
 

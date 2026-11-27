@@ -897,6 +897,33 @@ window.PokeGameUI = (function() {
     window.PokeStorage.showToast(`[GRAFICOS] Resolucao ASCII 3D ajustada para ${lbl} (${cols}x${rows} celulas)!`, "success");
   }
 
+  let asciiUiMode = false;
+  function applyAsciiUiModeState(active) {
+    asciiUiMode = Boolean(active);
+    if (document.body) {
+      if (asciiUiMode) document.body.classList.add("ascii-ui-mode");
+      else document.body.classList.remove("ascii-ui-mode");
+    }
+    const btn = document.getElementById("btn-ascii-ui-mode");
+    if (btn) btn.textContent = asciiUiMode ? "GO" : "ASCII";
+    const rLbl = document.getElementById("radial-ascii-ui-lbl");
+    if (rLbl) rLbl.textContent = asciiUiMode ? "MENUS: MODO GO" : "MENUS: MODO ASCII";
+  }
+
+  function toggleAsciiUiMode() {
+    window.PokeAudio.playUiClick();
+    applyAsciiUiModeState(!asciiUiMode);
+    try {
+      localStorage.setItem("pokeascii_ui_mode_v1", asciiUiMode ? "1" : "0");
+    } catch (_) {}
+    window.PokeStorage.showToast(
+      asciiUiMode
+        ? "+-[ INTERFACE ASCII TERMINAL ATIVADA (Toque em 'GO' p/ voltar ao tema claro) ]-+"
+        : "[UI] Interface padrao Pokemon GO ativada!",
+      "success"
+    );
+  }
+
   function adjustZoom(deltaDist) {
     if (gameScene !== "CITY_MAP") return;
     cityState.camOrbitDist = Math.max(2.5, Math.min(55.0, cityState.camOrbitDist + deltaDist));
@@ -2017,25 +2044,46 @@ window.PokeGameUI = (function() {
                  (t.type === "GYM" ? "rgba(140, 38, 56, 0.88)" :
                  (t.type === "VILLAIN" ? "rgba(105, 35, 165, 0.90)" : "rgba(18, 92, 168, 0.88)")));
 
-      ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-      const text = `${t.label} (${t.sub})`;
-      const w = Math.max(84, ctx.measureText(text).width + 18);
-      const h = 24;
-      const bx = t.x - w / 2;
-      const by = t.y - 34;
+      if (asciiUiMode) {
+        ctx.font = "bold 11px 'Cascadia Mono', Consolas, monospace";
+        const text = `[ ${t.label} | ${t.sub} ]`;
+        const w = Math.max(92, ctx.measureText(text).width + 14);
+        const h = 22;
+        const bx = t.x - w / 2;
+        const by = t.y - 34;
+        const borderCol = t.isStarter ? "#fbbf24" : (isWild ? "#26ccaa" : (t.type === "GYM" ? "#f43f5e" : "#38bdf8"));
 
-      ctx.fillStyle = bg;
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.roundRect(bx, by, w, h, 12);
-      ctx.fill();
-      ctx.stroke();
+        ctx.fillStyle = "rgba(6, 13, 28, 0.92)";
+        ctx.fillRect(bx, by, w, h);
+        ctx.strokeStyle = borderCol;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(bx, by, w, h);
 
-      ctx.fillStyle = "#ffffff";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(text, t.x, by + h / 2);
+        ctx.fillStyle = borderCol;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, t.x, by + h / 2);
+      } else {
+        ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+        const text = `${t.label} (${t.sub})`;
+        const w = Math.max(84, ctx.measureText(text).width + 18);
+        const h = 24;
+        const bx = t.x - w / 2;
+        const by = t.y - 34;
+
+        ctx.fillStyle = bg;
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, w, h, 12);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, t.x, by + h / 2);
+      }
     }
 
     // 3. Bolhas Flutuantes de Recompensas ao Girar PokéStop / Ginásio
@@ -4280,6 +4328,9 @@ window.PokeGameUI = (function() {
 
     resizeViewport();
     window.addEventListener("resize", resizeViewport);
+    try {
+      applyAsciiUiModeState(localStorage.getItem("pokeascii_ui_mode_v1") === "1");
+    } catch (_) {}
 
     await window.PokeStorage.initAndLoad();
     const p = window.PokeStorage.getProfile();
@@ -4325,6 +4376,7 @@ window.PokeGameUI = (function() {
     toggleRealCamera,
     toggleSceneMode,
     cycleAsciiDetailTier,
+    toggleAsciiUiMode,
     adjustZoom,
     startRealGpsTracking,
     toggleNavModeOrResyncGps,

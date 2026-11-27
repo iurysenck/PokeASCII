@@ -1356,6 +1356,15 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
           const z = w0*sz[0] + w1*sz[1] + w2*sz[2];
           const idx = py * gw + px;
           if (z >= pZ[idx]) continue;
+
+          let nx = v0.norm.x*w0 + v1.norm.x*w1 + v2.norm.x*w2;
+          let ny = v0.norm.y*w0 + v1.norm.y*w1 + v2.norm.y*w2;
+          const nz = v0.norm.z*w0 + v1.norm.z*w1 + v2.norm.z*w2;
+
+          let cr = v0.col.x*w0 + v1.col.x*w1 + v2.col.x*w2;
+          let cg = v0.col.y*w0 + v1.col.y*w1 + v2.col.y*w2;
+          let cb = v0.col.z*w0 + v1.col.z*w1 + v2.col.z*w2;
+
           if (mesh.textures && v0.texIdx !== undefined && v0.texIdx >= 0 && mesh.textures[v0.texIdx]) {
             const tu = v0.u*w0 + v1.u*w1 + v2.u*w2;
             const tv = v0.v*w0 + v1.v*w1 + v2.v*w2;
