@@ -478,6 +478,35 @@
   <button class="ar-bottom-right-ball" onclick="window.PokeGameUI.showBagModal('ball')" title="Trocar Pokébola">🔴</button>
 </div>
 
+<!-- ==================== HUD DA ARENA DE BATALHA 3D AO VIVO ==================== -->
+<div id="live-battle-hud" style="position:absolute;inset:0;pointer-events:none;display:none;z-index:18;">
+  <button class="ar-top-left-flee" onclick="window.PokeGameUI.fleeLiveBattle()" title="Sair da Batalha" style="pointer-events:auto;">🏃</button>
+
+  <!-- Botões de Combate Ao Vivo na Base da Tela (Esquivar / Orbe de Especial Carregado / Escudo Protetor) -->
+  <div style="position:absolute;bottom:22px;left:0;right:0;display:flex;justify-content:center;align-items:center;gap:18px;pointer-events:auto;">
+    <button onclick="window.PokeGameUI.triggerBattleDodge(-1)"
+      style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.92);border:3px solid #38bdf8;font-size:20px;font-weight:800;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.45);"
+      title="Esquivar (Swipe ou Toque)">
+      💨
+    </button>
+
+    <!-- Orbe Central do Golpe Especial / Carregado (Enche de 0% a 100% conforme você ataca!) -->
+    <button id="btn-live-charged" onclick="window.PokeGameUI.triggerPlayerAttack(true)"
+      style="width:84px;height:84px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#ef4444);color:#ffffff;border:4px solid #ffffff;font-size:12px;font-weight:900;cursor:pointer;box-shadow:0 0 24px rgba(245,158,11,0.75);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;transition:transform 0.1s;">
+      <span style="font-size:24px;" id="lbl-charged-icon">💥</span>
+      <span id="lbl-charged-name">ESPECIAL</span>
+      <span id="lbl-charged-pct" style="font-size:10px;">0%</span>
+    </button>
+
+    <!-- Botão de Escudo Protetor (Protect Shield igual ao Pokémon GO!) -->
+    <button id="btn-live-shield" onclick="window.PokeGameUI.triggerBattleShield()"
+      style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.92);border:3px solid #a855f7;font-size:15px;font-weight:900;color:#6b21a8;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.45);"
+      title="Ativar Escudo Protetor contra Especial">
+      🛡️2
+    </button>
+  </div>
+</div>
+
 <!-- ==================== MENU RADIAL TRANSLÚCIDO VERDE-MENTA (Ref: 22.18.12 (1).jpeg) ==================== -->
 <div id="pogo-radial-menu">
   <div class="radial-top-settings">

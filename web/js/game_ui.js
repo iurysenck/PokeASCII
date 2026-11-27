@@ -92,7 +92,30 @@ window.PokeGameUI = (function() {
   };
 
   let battleState = null;
+  let evoCutscene = null; // Estado da Cutscene 3D de Evolução com Morph de Silhueta!
   let deferredPwaPrompt = null;
+
+  // Paleta de Cores e Glifos ASCII por Tipo Elemental para os Efeitos Visuais (VFX) de Ataques e Especiais!
+  const ELEMENTAL_VFX_STYLE = {
+    Electric: { color: "#fde047", glow: "#eab308", glyphs: "⚡*+/\\%#", icon: "⚡" },
+    Fire:     { color: "#fb923c", glow: "#ef4444", glyphs: "🔥@#*+^~", icon: "🔥" },
+    Water:    { color: "#38bdf8", glow: "#0284c7", glyphs: "💧~≈=o*@", icon: "💧" },
+    Grass:    { color: "#4ade80", glow: "#16a34a", glyphs: "🍃/*+~@#", icon: "🍃" },
+    Psychic:  { color: "#f472b6", glow: "#9333ea", glyphs: "🌀()@✦*%", icon: "🌀" },
+    Ghost:    { color: "#c084fc", glow: "#581c87", glyphs: "🟣#@%*?~", icon: "👻" },
+    Dragon:   { color: "#818cf8", glow: "#f59e0b", glyphs: "🐉//\\\\✦#", icon: "🐉" },
+    Ice:      { color: "#bae6fd", glow: "#0ea5e9", glyphs: "❄️*+<>#◊", icon: "❄️" },
+    Fighting: { color: "#f87171", glow: "#b91c1c", glyphs: "🥊✖//\\\\#", icon: "🥊" },
+    Rock:     { color: "#d6d3d1", glow: "#78716c", glyphs: "🪨▲■#*+=", icon: "🪨" },
+    Ground:   { color: "#fcd34d", glow: "#b45309", glyphs: "🌋▲~=#*+", icon: "🌋" },
+    Flying:   { color: "#e0f2fe", glow: "#38bdf8", glyphs: "🌪️~//\\\\*", icon: "🌪️" },
+    Poison:   { color: "#e879f9", glow: "#7e22ce", glyphs: "☠️o°@%#*", icon: "☠️" },
+    Bug:      { color: "#a3e635", glow: "#4d7c0f", glyphs: "🐝//\\\\*+", icon: "🐝" },
+    Steel:    { color: "#e2e8f0", glow: "#64748b", glyphs: "⚙️✦+#=<>", icon: "⚙️" },
+    Dark:     { color: "#94a3b8", glow: "#0f172a", glyphs: "🌑#@%*//", icon: "🌑" },
+    Fairy:    { color: "#fbcfe8", glow: "#db2777", glyphs: "✨✦*+♡@#", icon: "✨" },
+    Normal:   { color: "#f8fafc", glow: "#94a3b8", glyphs: "💥*+#@//", icon: "💥" }
+  };
 
   // ============================================================================
   // GPS REAL DO DISPOSITIVO + MAPA VETORIAL 3D DO OPENSTREETMAP
@@ -290,6 +313,10 @@ window.PokeGameUI = (function() {
 
     if (gameScene === "CITY_MAP") {
       renderPokemonGo3DCityMap(W, H, timeSec);
+    } else if (gameScene === "LIVE_BATTLE") {
+      renderPokemonGoLiveBattleArena(W, H, timeSec);
+    } else if (gameScene === "EVOLUTION_CUTSCENE") {
+      renderEvolutionMorphCutscene(W, H, timeSec);
     } else {
       renderPokemonGoArEncounter(W, H, timeSec);
     }
@@ -1498,19 +1525,19 @@ window.PokeGameUI = (function() {
     }
   }
 
-  // 7. Modal GO BATTLE LEAGUE & RAIDS (Ref: 22.18.09.jpeg & 22.18.09 (1).jpeg)
+  // 7. Modal GO BATTLE LEAGUE & RAIDS + ARENA DE BATALHA 3D AO VIVO!
   function showBattleHubModal() {
     const prof = S.getProfile();
     const html = `
       <div class="pogo-white-card" style="text-align:center;">
-        <div style="font-size:13px;font-weight:800;color:#1c8c82;letter-spacing:1px;">GO BATTLE LEAGUE</div>
+        <div style="font-size:13px;font-weight:800;color:#1c8c82;letter-spacing:1px;">GO BATTLE LEAGUE (AO VIVO 3D)</div>
         <div style="font-size:12px;color:#5a8288;margin:4px 0 12px;">Wins: ${prof.stats.gymsWon + prof.stats.raidsWon} • Stardust Earned: ${prof.stardust}</div>
         <button class="pogo-pill-btn" style="width:100%;" onclick="window.PokeGameUI.startBattle('GYM', 26, 1850)">
           ⚔️ GREAT LEAGUE / GYM BATTLE (+50 🪙)
         </button>
       </div>
       <div class="pogo-white-card" style="text-align:center;">
-        <div style="font-size:13px;font-weight:800;color:#e11d48;letter-spacing:1px;">5-STAR LEGENDARY RAIDS</div>
+        <div style="font-size:13px;font-weight:800;color:#e11d48;letter-spacing:1px;">5-STAR LEGENDARY RAIDS (AO VIVO 3D)</div>
         <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px;">
           <button class="pogo-pill-btn" onclick="window.PokeGameUI.startBattle('RAID', 150, 4200)">👹 RAID: MEWTWO (CP 4200)</button>
           <button class="pogo-pill-btn" onclick="window.PokeGameUI.startBattle('RAID', 384, 4500)">🐉 RAID: RAYQUAZA (CP 4500)</button>
@@ -1521,81 +1548,290 @@ window.PokeGameUI = (function() {
   }
 
   function startBattle(mode, enemySpeciesId, enemyCp) {
+    closeModal();
+    closeRadialMenu();
     const prof = S.getProfile();
     const myPk = prof.pokemonBox[0];
     const enemySp = D.getSpecies(enemySpeciesId);
+    const mySp = D.getSpecies(myPk.speciesId);
+
     battleState = {
-      mode, playerPk: myPk,
-      playerHp: myPk.maxHp || 120, playerMaxHp: myPk.maxHp || 120, playerEnergy: 0,
-      enemySpecies: enemySp, enemyCp,
-      enemyMaxHp: Math.round(140 + enemyCp * 0.045),
-      enemyHp: Math.round(140 + enemyCp * 0.045),
-      log: `${myPk.name} vs ${enemySp.name}!`
+      mode,
+      playerPk: myPk,
+      playerSpecies: mySp,
+      playerHp: myPk.maxHp || 140,
+      playerMaxHp: myPk.maxHp || 140,
+      playerEnergy: 0,
+      playerLunge: 0,
+      playerHitFlash: 0,
+      playerDodgeX: 0,
+      playerShieldTimer: 0,
+      shieldsLeft: 2,
+      lastPlayerAttackAt: 0,
+
+      enemySpecies: enemySp,
+      enemyCp,
+      enemyMaxHp: Math.round(180 + enemyCp * 0.055),
+      enemyHp: Math.round(180 + enemyCp * 0.055),
+      enemyEnergy: 0,
+      enemyLunge: 0,
+      enemyHitFlash: 0,
+      enemyAttackTimer: 0.4,
+      enemyChargingSpecial: false,
+      enemySpecialTimer: 0,
+
+      camShake: 0,
+      specialCineTimer: 0,
+      specialCineSide: null, // "player" ou "enemy"
+      specialCineMove: null,
+      vfxProjectiles: [],    // Projéteis, feixes, raios, chamas e explosões ASCII
+      floatingTexts: [],     // Números de dano flutuantes (-38, SUPER EFFECTIVE!)
+      bannerMsg: `⚔️ ${myPk.name} vs ${enemySp.name}! Toque na tela para atacar e esquive dos especiais!`
     };
-    renderActiveBattleModal();
+
+    gameScene = "LIVE_BATTLE";
+    document.getElementById("map-overworld-hud").style.display = "none";
+    document.getElementById("ar-encounter-hud").style.display = "none";
+    document.getElementById("live-battle-hud").style.display = "block";
+
+    A.playPokemonCry(enemySpeciesId);
+    updateLiveBattleHudButtons();
   }
 
-  function renderActiveBattleModal() {
+  function fleeLiveBattle() {
+    battleState = null;
+    document.getElementById("live-battle-hud").style.display = "none";
+    toggleSceneMode("CITY_MAP");
+  }
+
+  function updateLiveBattleHudButtons() {
     if (!battleState) return;
     const b = battleState;
-    const pPct = Math.max(0, Math.round((b.playerHp / b.playerMaxHp) * 100));
-    const ePct = Math.max(0, Math.round((b.enemyHp / b.enemyMaxHp) * 100));
     const cm = D.CHARGED_MOVES[b.playerPk.chargedMove] || D.CHARGED_MOVES.Thunderbolt;
-    const canCharged = b.playerEnergy >= cm.energyCost;
-    const enemyImg = E.getPokemonCardImageSrc(b.enemySpecies.id, false, false);
-    const myImg = E.getPokemonCardImageSrc(b.playerPk.speciesId, b.playerPk.isShiny, false);
+    const st = ELEMENTAL_VFX_STYLE[cm.type] || ELEMENTAL_VFX_STYLE.Normal;
+    const pct = Math.min(100, Math.round((b.playerEnergy / cm.energyCost) * 100));
+    const ready = pct >= 100;
 
-    const html = `
-      <div class="pogo-white-card" style="text-align:center;">
-        <div style="display:flex;justify-content:space-around;align-items:center;">
-          <div>
-            <img src="${enemyImg}" style="width:86px;height:86px;object-fit:contain;"/>
-            <div style="font-weight:800;">${b.enemySpecies.name}</div>
-            <div style="width:110px;height:7px;background:#fee2e2;border-radius:4px;overflow:hidden;margin:4px auto;">
-              <div style="width:${ePct}%;height:100%;background:#ef4444;"></div>
-            </div>
-          </div>
-          <div style="font-size:20px;font-weight:900;color:#1c8c82;">VS</div>
-          <div>
-            <img src="${myImg}" style="width:86px;height:86px;object-fit:contain;"/>
-            <div style="font-weight:800;">${b.playerPk.name}</div>
-            <div style="width:110px;height:7px;background:#d1fae5;border-radius:4px;overflow:hidden;margin:4px auto;">
-              <div style="width:${pPct}%;height:100%;background:#10b981;"></div>
-            </div>
-          </div>
-        </div>
-        <div style="margin:12px 0;font-weight:800;color:#1c8c82;">${b.log}</div>
-        <div style="display:flex;flex-direction:column;gap:8px;">
-          <button class="pogo-pill-btn" onclick="window.PokeGameUI.executeBattleTurn(false)">
-            ⚡ FAST ATTACK: ${b.playerPk.fastMove}
-          </button>
-          <button class="pogo-pill-btn ${canCharged ? "" : "secondary"}" ${canCharged ? "" : "disabled"}
-            onclick="window.PokeGameUI.executeBattleTurn(true)">
-            💥 CHARGED: ${cm.name} (${b.playerEnergy}/${cm.energyCost})
-          </button>
-        </div>
-      </div>`;
-    openModal(`BATTLE (${b.mode})`, html);
+    const btnC = document.getElementById("btn-live-charged");
+    const lblI = document.getElementById("lbl-charged-icon");
+    const lblN = document.getElementById("lbl-charged-name");
+    const lblP = document.getElementById("lbl-charged-pct");
+    if (btnC && lblI && lblN && lblP) {
+      lblI.textContent = st.icon;
+      lblN.textContent = cm.name.slice(0, 10).toUpperCase();
+      lblP.textContent = ready ? "PRONTO!" : `${pct}%`;
+      btnC.style.background = ready
+        ? `linear-gradient(135deg, ${st.color}, ${st.glow})`
+        : `conic-gradient(${st.glow} ${pct}%, rgba(30,41,59,0.88) ${pct}%)`;
+      btnC.style.transform = ready ? "scale(1.10)" : "scale(1.0)";
+    }
+
+    const btnS = document.getElementById("btn-live-shield");
+    if (btnS) {
+      btnS.textContent = `🛡️${b.shieldsLeft}`;
+      btnS.style.opacity = b.shieldsLeft > 0 ? "1" : "0.45";
+    }
   }
 
-  function executeBattleTurn(useCharged) {
-    if (!battleState) return;
+  function triggerBattleDodge(dir = 1) {
+    if (!battleState || battleState.specialCineTimer > 0) return;
+    A.playUiClick();
+    battleState.playerDodgeX = dir * 1.0;
+    battleState.floatingTexts.push({
+      x: canvas.width * 0.28, y: canvas.height * 0.62,
+      text: "💨 ESQUIVOU!", color: "#38bdf8", life: 0.75, big: false
+    });
+  }
+
+  function triggerBattleShield() {
+    if (!battleState || battleState.shieldsLeft <= 0 || battleState.playerShieldTimer > 0) return;
+    A.playGotchaFanfare();
+    battleState.shieldsLeft--;
+    battleState.playerShieldTimer = 3.0;
+    battleState.floatingTexts.push({
+      x: canvas.width * 0.28, y: canvas.height * 0.58,
+      text: "🛡️ ESCUDO PROTETOR ATIVO!", color: "#c084fc", life: 1.1, big: true
+    });
+    updateLiveBattleHudButtons();
+  }
+
+  // Dispara Ataque Rápido ou Especial Carregado com Efeitos Visuais (VFX) Elementais Genéricos!
+  function triggerPlayerAttack(useCharged = false) {
+    if (!battleState || battleState.specialCineTimer > 0) return;
     const b = battleState;
+    const now = performance.now();
+    if (!useCharged && now - b.lastPlayerAttackAt < 260) return;
+    b.lastPlayerAttackAt = now;
+
     const fm = D.FAST_MOVES[b.playerPk.fastMove] || D.FAST_MOVES.QuickAttack;
     const cm = D.CHARGED_MOVES[b.playerPk.chargedMove] || D.CHARGED_MOVES.Thunderbolt;
     const move = useCharged ? cm : fm;
-    if (useCharged && b.playerEnergy < cm.energyCost) return;
+
+    if (useCharged && b.playerEnergy < cm.energyCost) {
+      S.showToast(`⚡ Continue atacando para encher a energia do ${cm.name}!`, "info");
+      return;
+    }
+
     A.playAttack(useCharged);
+    b.playerLunge = 1.0;
 
-    const eff = D.getTypeEffectiveness(move.type, b.enemySpecies.types);
-    const dmg = Math.max(8, Math.round((useCharged ? move.power * 0.8 : move.power * 2.4) * eff * (1 + b.playerPk.cp / 1400)));
-    b.enemyHp = Math.max(0, b.enemyHp - dmg);
-    if (useCharged) b.playerEnergy -= cm.energyCost;
-    else b.playerEnergy = Math.min(100, b.playerEnergy + fm.energyGain * 2);
+    if (useCharged) {
+      b.playerEnergy = Math.max(0, b.playerEnergy - cm.energyCost);
+      b.specialCineTimer = 1.55;
+      b.specialCineSide = "player";
+      b.specialCineMove = cm;
+      b.bannerMsg = `💥 ${b.playerPk.name.toUpperCase()} LANÇOU ${cm.name.toUpperCase()}!`;
+    } else {
+      b.playerEnergy = Math.min(100, b.playerEnergy + fm.energyGain * 1.6);
+      spawnAttackVfx("player", move, false);
+      applyBattleDamage("enemy", move, false);
+    }
+    updateLiveBattleHudButtons();
+  }
 
-    b.log = `${b.playerPk.name} used ${move.name} (${dmg} dmg)!`;
+  function spawnAttackVfx(attackerSide, move, isCharged) {
+    if (!battleState) return;
+    const W = canvas.width, H = canvas.height;
+    const st = ELEMENTAL_VFX_STYLE[move.type] || ELEMENTAL_VFX_STYLE.Normal;
+    const fromX = attackerSide === "player" ? W * 0.28 : W * 0.72;
+    const fromY = attackerSide === "player" ? H * 0.62 : H * 0.36;
+    const toX   = attackerSide === "player" ? W * 0.72 : W * 0.28;
+    const toY   = attackerSide === "player" ? H * 0.36 : H * 0.62;
 
-    if (b.enemyHp <= 0) {
+    const count = isCharged ? 36 : 12;
+    for (let i = 0; i < count; ++i) {
+      const ch = st.glyphs[i % st.glyphs.length];
+      battleState.vfxProjectiles.push({
+        fromX, fromY, toX, toY,
+        progress: -(i * (isCharged ? 0.018 : 0.035)),
+        speed: isCharged ? 2.2 : 3.2,
+        spreadX: (Math.random() - 0.5) * (isCharged ? 120 : 38),
+        spreadY: (Math.random() - 0.5) * (isCharged ? 120 : 38),
+        glyph: ch,
+        color: i % 2 === 0 ? st.color : st.glow,
+        size: isCharged ? (18 + (i % 12)) : (14 + (i % 6)),
+        isCharged
+      });
+    }
+  }
+
+  function applyBattleDamage(targetSide, move, isCharged) {
+    if (!battleState) return;
+    const b = battleState;
+    const W = canvas.width, H = canvas.height;
+
+    if (targetSide === "enemy") {
+      const eff = D.getTypeEffectiveness(move.type, b.enemySpecies.types);
+      const rawDmg = (isCharged ? move.power * 0.85 : move.power * 1.9) * eff * (1 + b.playerPk.cp / 1500);
+      const dmg = Math.max(6, Math.round(rawDmg));
+      b.enemyHp = Math.max(0, b.enemyHp - dmg);
+      b.enemyHitFlash = 1.0;
+      b.camShake = isCharged ? 18 : 6;
+
+      const tx = W * 0.72 + (Math.random() - 0.5) * 40;
+      const ty = H * 0.28;
+      b.floatingTexts.push({
+        x: tx, y: ty,
+        text: `-${dmg}`,
+        color: eff > 1.1 ? "#fde047" : "#ffffff",
+        life: 0.95,
+        big: isCharged || eff > 1.1
+      });
+      if (eff > 1.1) {
+        b.floatingTexts.push({ x: tx, y: ty - 22, text: "🔥 SUPER EFFECTIVE!", color: "#fb923c", life: 1.1, big: true });
+      }
+    } else {
+      // Inimigo atacando o jogador (verifica Escudo Protetor ou Esquiva!)
+      const eff = D.getTypeEffectiveness(move.type, b.playerSpecies.types);
+      let dmg = Math.max(4, Math.round((isCharged ? 38 : 11) * eff * (1 + b.enemyCp / 3200)));
+      const tx = W * 0.28, ty = H * 0.52;
+
+      if (b.playerShieldTimer > 0) {
+        dmg = Math.max(1, Math.round(dmg * 0.10));
+        b.floatingTexts.push({ x: tx, y: ty - 24, text: "🛡️ BLOQUEADO PELO ESCUDO!", color: "#c084fc", life: 1.0, big: true });
+      } else if (Math.abs(b.playerDodgeX) > 0.25) {
+        dmg = Math.max(1, Math.round(dmg * 0.25));
+        b.floatingTexts.push({ x: tx, y: ty - 24, text: "💨 ESQUIVA PARCIAL!", color: "#38bdf8", life: 0.9, big: false });
+      }
+
+      b.playerHp = Math.max(0, b.playerHp - dmg);
+      b.playerHitFlash = 1.0;
+      b.camShake = isCharged ? 15 : 5;
+      b.floatingTexts.push({ x: tx, y: ty, text: `-${dmg}`, color: "#ff4d6d", life: 0.9, big: isCharged });
+    }
+  }
+
+  function updateLiveBattlePhysics(dt) {
+    if (gameScene !== "LIVE_BATTLE" || !battleState) return;
+    const b = battleState;
+
+    b.playerLunge = Math.max(0, b.playerLunge - dt * 3.5);
+    b.enemyLunge = Math.max(0, b.enemyLunge - dt * 3.5);
+    b.playerHitFlash = Math.max(0, b.playerHitFlash - dt * 4.0);
+    b.enemyHitFlash = Math.max(0, b.enemyHitFlash - dt * 4.0);
+    b.playerDodgeX *= Math.pow(0.08, dt);
+    b.playerShieldTimer = Math.max(0, b.playerShieldTimer - dt);
+    b.camShake = Math.max(0, b.camShake - dt * 32);
+
+    // Atualiza Cutscene de Ataque Especial Carregado
+    if (b.specialCineTimer > 0) {
+      const prevT = b.specialCineTimer;
+      b.specialCineTimer = Math.max(0, b.specialCineTimer - dt);
+      if (prevT >= 0.80 && b.specialCineTimer < 0.80) {
+        // No pico da animação especial (0.8s restantes), dispara a tempestade elemental e aplica o dano!
+        spawnAttackVfx(b.specialCineSide, b.specialCineMove, true);
+        applyBattleDamage(b.specialCineSide === "player" ? "enemy" : "player", b.specialCineMove, true);
+      }
+    } else {
+      // IA do Inimigo / Boss de Raid atacando ao vivo em tempo real!
+      b.enemyAttackTimer -= dt;
+      if (b.enemyChargingSpecial) {
+        b.enemySpecialTimer -= dt;
+        if (b.enemySpecialTimer <= 0) {
+          b.enemyChargingSpecial = false;
+          const eCm = D.CHARGED_MOVES[b.enemySpecies.chargedMove] || D.CHARGED_MOVES.ShadowBall;
+          A.playAttack(true);
+          b.enemyLunge = 1.0;
+          b.specialCineTimer = 1.45;
+          b.specialCineSide = "enemy";
+          b.specialCineMove = eCm;
+          b.bannerMsg = `⚠️ ${b.enemySpecies.name.toUpperCase()} DISPAROU ${eCm.name.toUpperCase()}!`;
+        }
+      } else if (b.enemyAttackTimer <= 0) {
+        b.enemyAttackTimer = 1.35 + Math.random() * 0.45;
+        b.enemyEnergy += 24;
+        if (b.enemyEnergy >= 100) {
+          b.enemyEnergy = 0;
+          b.enemyChargingSpecial = true;
+          b.enemySpecialTimer = 1.75; // Dá 1.75s para o jogador ativar o Escudo 🛡️ ou Esquivar 💨!
+          const eCm = D.CHARGED_MOVES[b.enemySpecies.chargedMove] || D.CHARGED_MOVES.ShadowBall;
+          b.bannerMsg = `⚠️ PERIGO: ${b.enemySpecies.name} está carregando ${eCm.name}! Use 🛡️ ESCUDO ou 💨 ESQUIVE!`;
+          S.showToast(`⚠️ ${b.enemySpecies.name} vai lançar ${eCm.name}! Toque em 🛡️ Escudo ou 💨 Esquivar!`, "warn");
+        } else {
+          const eFm = D.FAST_MOVES[b.enemySpecies.fastMove] || D.FAST_MOVES.Tackle;
+          A.playAttack(false);
+          b.enemyLunge = 1.0;
+          spawnAttackVfx("enemy", eFm, false);
+          applyBattleDamage("player", eFm, false);
+        }
+      }
+    }
+
+    // Atualiza partículas VFX e textos flutuantes
+    for (let i = b.vfxProjectiles.length - 1; i >= 0; --i) {
+      const p = b.vfxProjectiles[i];
+      p.progress += dt * p.speed;
+      if (p.progress >= 1.15) b.vfxProjectiles.splice(i, 1);
+    }
+    for (let i = b.floatingTexts.length - 1; i >= 0; --i) {
+      const ft = b.floatingTexts[i];
+      ft.life -= dt;
+      ft.y -= dt * 38;
+      if (ft.life <= 0) b.floatingTexts.splice(i, 1);
+    }
+
+    // Verifica Vitória ou Derrota
+    if (b.enemyHp <= 0 && b.specialCineTimer <= 0) {
       const prof = S.getProfile();
       const coins = B.get().gymCoinReward || 50;
       prof.pokecoins += coins;
@@ -1619,16 +1855,190 @@ window.PokeGameUI = (function() {
       };
 
       A.playGotchaFanfare();
-      S.showToast(`🏆 VICTORY! +${coins} PokéCoins & +1,000 Stardust! Catch ${b.enemySpecies.name}!`, "info");
+      S.showToast(`🏆 VITÓRIA! +${coins} PokéCoins & +1.000 Stardust! Capture ${b.enemySpecies.name}!`, "info");
+      document.getElementById("live-battle-hud").style.display = "none";
       battleState = null;
-      closeModal();
       enterArEncounterWithWild(0);
       updateHudCounters();
-      return;
+    } else if (b.playerHp <= 0 && b.specialCineTimer <= 0) {
+      S.showToast(`💫 Seu ${b.playerPk.name} recuou! Fortaleça-o com Power Up e tente novamente.`, "warn");
+      fleeLiveBattle();
+    }
+  }
+
+  // Renderiza a Arena 3D de Batalha Ao Vivo com Câmera Dinâmica, VFX Elementais e Escudo Hexagonal!
+  function renderPokemonGoLiveBattleArena(W, H, timeSec) {
+    if (!battleState) return;
+    const b = battleState;
+
+    const shakeX = (Math.random() - 0.5) * b.camShake;
+    const shakeY = (Math.random() - 0.5) * b.camShake;
+
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
+
+    // 1. Fundo do Estádio 3D de Batalha (Escurece dramaticamente durante Ataques Especiais Carregados!)
+    const isCine = b.specialCineTimer > 0;
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, isCine ? "#060814" : "#111c3d");
+    bgGrad.addColorStop(0.45, isCine ? "#0f172a" : "#1e3a5f");
+    bgGrad.addColorStop(1, isCine ? "#090d16" : "#132a42");
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+
+    // Anéis Holográficos da Arena 3D no chão
+    const enemyBaseX = W * 0.70 - b.enemyLunge * 75;
+    const enemyBaseY = H * 0.38 + b.enemyLunge * 42;
+    const playerBaseX = W * 0.28 + b.playerLunge * 75 + b.playerDodgeX * 85;
+    const playerBaseY = H * 0.66 - b.playerLunge * 42;
+
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(enemyBaseX, enemyBaseY + 35, 95, 34, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(38, 204, 170, 0.55)";
+    ctx.beginPath(); ctx.ellipse(playerBaseX, playerBaseY + 42, 115, 42, 0, 0, Math.PI * 2); ctx.stroke();
+
+    // Linhas de velocidade / Energia durante Especial Carregado!
+    if (isCine && b.specialCineMove) {
+      const st = ELEMENTAL_VFX_STYLE[b.specialCineMove.type] || ELEMENTAL_VFX_STYLE.Normal;
+      const focusX = b.specialCineSide === "player" ? playerBaseX : enemyBaseX;
+      const focusY = b.specialCineSide === "player" ? playerBaseY : enemyBaseY;
+
+      ctx.save();
+      ctx.strokeStyle = st.glow;
+      ctx.fillStyle = st.color;
+      ctx.font = "bold 18px 'Cascadia Mono', Consolas, monospace";
+      for (let k = 0; k < 20; ++k) {
+        const ang = (k / 20) * Math.PI * 2 + timeSec * 8;
+        const rIn = Math.max(10, (b.specialCineTimer - 0.75) * 190);
+        const rx = focusX + Math.cos(ang) * rIn;
+        const ry = focusY + Math.sin(ang) * rIn * 0.7;
+        ctx.fillText(st.glyphs[k % st.glyphs.length], rx, ry);
+      }
+
+      // Feixe Elemental Gigante atravessando a Arena no momento do disparo (specialCineTimer < 0.85)!
+      if (b.specialCineTimer < 0.85) {
+        const dstX = b.specialCineSide === "player" ? enemyBaseX : playerBaseX;
+        const dstY = b.specialCineSide === "player" ? enemyBaseY : playerBaseY;
+        ctx.strokeStyle = st.glow;
+        ctx.lineWidth = 38 * (b.specialCineTimer / 0.85);
+        ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(focusX, focusY); ctx.lineTo(dstX, dstY); ctx.stroke();
+
+        ctx.strokeStyle = st.color;
+        ctx.lineWidth = 16 * (b.specialCineTimer / 0.85);
+        ctx.beginPath(); ctx.moveTo(focusX, focusY); ctx.lineTo(dstX, dstY); ctx.stroke();
+      }
+      ctx.restore();
     }
 
-    b.playerHp = Math.max(1, b.playerHp - Math.max(5, Math.round(10 + b.enemyCp * 0.004)));
-    renderActiveBattleModal();
+    // 2. Desenha o Pokémon Inimigo / Boss 3D (Fundo-Direita)
+    const enemySize = Math.min(W * 0.42, H * 0.28) * 1.05;
+    const enemyBob = Math.sin(timeSec * 4.5) * 7;
+    const enemySculp = E.getPokemonAscii3DSculpture(b.enemySpecies.id, false, false);
+    ctx.save();
+    ctx.translate(enemyBaseX, enemyBaseY + enemyBob);
+    if (b.enemyChargingSpecial) {
+      // Aura vermelha pulsante avisando que o Inimigo vai soltar Especial!
+      ctx.strokeStyle = "#ef4444";
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(0, 0, enemySize * 0.58 + Math.sin(timeSec * 25) * 8, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.drawImage(enemySculp, -enemySize * 0.5, -enemySize * 0.5, enemySize, enemySize);
+    if (b.enemyHitFlash > 0.05) {
+      ctx.globalCompositeOperation = "source-atop";
+      ctx.fillStyle = `rgba(255, 255, 255, ${b.enemyHitFlash * 0.8})`;
+      ctx.fillRect(-enemySize * 0.5, -enemySize * 0.5, enemySize, enemySize);
+    }
+    ctx.restore();
+
+    // 3. Desenha o Seu Pokémon 3D (Frente-Esquerda) + Domo do Escudo Protetor!
+    const playerSize = Math.min(W * 0.46, H * 0.30) * 1.12;
+    const playerBob = Math.cos(timeSec * 5.0) * 8;
+    const playerSculp = E.getPokemonAscii3DSculpture(b.playerPk.speciesId, b.playerPk.isShiny, false);
+    ctx.save();
+    ctx.translate(playerBaseX, playerBaseY + playerBob);
+    ctx.drawImage(playerSculp, -playerSize * 0.5, -playerSize * 0.5, playerSize, playerSize);
+    if (b.playerHitFlash > 0.05) {
+      ctx.globalCompositeOperation = "source-atop";
+      ctx.fillStyle = `rgba(255, 70, 90, ${b.playerHitFlash * 0.75})`;
+      ctx.fillRect(-playerSize * 0.5, -playerSize * 0.5, playerSize, playerSize);
+    }
+    if (b.playerShieldTimer > 0) {
+      ctx.strokeStyle = "rgba(192, 132, 252, 0.92)";
+      ctx.fillStyle = "rgba(168, 85, 247, 0.22)";
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(0, 0, playerSize * 0.58, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+
+    // 4. Desenha todos os Projéteis e Partículas ASCII dos Ataques Rápidos e Especiais!
+    ctx.save();
+    for (const p of b.vfxProjectiles) {
+      if (p.progress < 0 || p.progress > 1.1) continue;
+      const t = Math.min(1, p.progress);
+      const arc = Math.sin(t * Math.PI) * (p.isCharged ? 45 : 22);
+      const px = p.fromX * (1 - t) + p.toX * t + p.spreadX * Math.sin(t * Math.PI);
+      const py = p.fromY * (1 - t) + p.toY * t - arc + p.spreadY * Math.sin(t * Math.PI);
+
+      ctx.font = `900 ${p.size}px 'Cascadia Mono', Consolas, monospace`;
+      ctx.fillStyle = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 10;
+      ctx.fillText(p.glyph, px, py);
+    }
+    ctx.restore();
+
+    // 5. Barras de HP Estilo Pokémon GO no Topo dos 2 Lutadores + Textos de Dano Flutuantes
+    drawFighterStatusCard(W - 195, 16, b.enemySpecies.name, b.enemyCp, b.enemyHp, b.enemyMaxHp, true);
+    drawFighterStatusCard(68, 16, b.playerPk.name, b.playerPk.cp, b.playerHp, b.playerMaxHp, false);
+
+    // Banner central de ação ao vivo
+    ctx.save();
+    ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+    ctx.beginPath(); ctx.roundRect(W * 0.5 - 165, 76, 330, 28, 14); ctx.fill();
+    ctx.fillStyle = "#fde047";
+    ctx.font = "800 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(b.bannerMsg, W * 0.5, 94);
+
+    // Textos flutuantes de dano (-42, SUPER EFFECTIVE!, ESQUIVOU!)
+    for (const ft of b.floatingTexts) {
+      ctx.font = ft.big ? "900 20px -apple-system, sans-serif" : "800 15px -apple-system, sans-serif";
+      ctx.fillStyle = ft.color;
+      ctx.strokeStyle = "#090d16";
+      ctx.lineWidth = 3;
+      ctx.strokeText(ft.text, ft.x, ft.y);
+      ctx.fillText(ft.text, ft.x, ft.y);
+    }
+    ctx.restore();
+    ctx.restore();
+  }
+
+  function drawFighterStatusCard(x, y, name, cp, hp, maxHp, isEnemy) {
+    const pct = Math.max(0, Math.min(100, Math.round((hp / Math.max(1, maxHp)) * 100)));
+    const barCol = pct > 50 ? "#22c55e" : (pct > 22 ? "#eab308" : "#ef4444");
+    ctx.save();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.beginPath(); ctx.roundRect(x, y, 180, 50, 12); ctx.fill();
+    ctx.strokeStyle = isEnemy ? "#ef4444" : "#26ccaa";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = "#254a52";
+    ctx.font = "800 13px -apple-system, sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(`${name} (CP ${cp})`, x + 10, y + 18);
+
+    ctx.fillStyle = "#e2e8f0";
+    ctx.beginPath(); ctx.roundRect(x + 10, y + 25, 160, 9, 4); ctx.fill();
+    ctx.fillStyle = barCol;
+    ctx.beginPath(); ctx.roundRect(x + 10, y + 25, 160 * (pct / 100), 9, 4); ctx.fill();
+
+    ctx.fillStyle = "#64748b";
+    ctx.font = "700 10px -apple-system, sans-serif";
+    ctx.fillText(`HP ${hp} / ${maxHp}`, x + 10, y + 45);
+    ctx.restore();
   }
 
   // 8. Modal GO PASS & FIELD RESEARCH (Ref: 22.18.11 (2).jpeg & 22.18.12 (2).jpeg)
@@ -1793,19 +2203,26 @@ window.PokeGameUI = (function() {
     showPokemonDetailCardModal(uid);
   }
 
+  // ============================================================================
+  // CUTSCENE 3D DE EVOLUÇÃO COM MORPH DE SILHUETA E HÉLICE DNA ASCII!
+  // ============================================================================
   function evolvePokemon(uid) {
     const prof = S.getProfile();
     const pk = prof.pokemonBox.find(p => p.uid === uid);
     if (!pk) return;
-    const sp = D.getSpecies(pk.speciesId);
-    if (!sp.evolvesTo) return;
+    const oldSp = D.getSpecies(pk.speciesId);
+    if (!oldSp.evolvesTo) return;
     const candies = prof.candies[pk.speciesId] || 0;
-    if (candies < sp.candyCost) {
-      S.showToast(`⚠️ Requer ${sp.candyCost} Candies!`, "warn");
+    if (candies < oldSp.candyCost) {
+      S.showToast(`⚠️ Requer ${oldSp.candyCost} Candies!`, "warn");
       return;
     }
-    prof.candies[pk.speciesId] -= sp.candyCost;
-    const nextSp = D.getSpecies(sp.evolvesTo);
+
+    prof.candies[pk.speciesId] -= oldSp.candyCost;
+    const nextSp = D.getSpecies(oldSp.evolvesTo);
+    const oldSpeciesId = oldSp.id;
+    const oldName = oldSp.name;
+
     pk.speciesId = nextSp.id;
     pk.name = nextSp.name;
     pk.fastMove = nextSp.fastMove;
@@ -1816,10 +2233,165 @@ window.PokeGameUI = (function() {
     prof.pokedexCaught[nextSp.id] = (prof.pokedexCaught[nextSp.id] || 0) + 1;
     S.addXp(500);
     S.save();
-    A.playGotchaFanfare();
-    A.playPokemonCry(nextSp.id);
-    showPokemonDetailCardModal(uid);
     updateHudCounters();
+
+    // Inicia a Cutscene 3D de Evolução com Morph entre oldSpeciesId -> nextSp.id!
+    closeModal();
+    evoCutscene = {
+      uid: pk.uid,
+      oldId: oldSpeciesId,
+      newId: nextSp.id,
+      oldName,
+      newName: nextSp.name,
+      newCp: pk.cp,
+      isShiny: pk.isShiny,
+      timer: 0,
+      duration: 5.2,
+      cryPlayed: false
+    };
+    gameScene = "EVOLUTION_CUTSCENE";
+    document.getElementById("map-overworld-hud").style.display = "none";
+    document.getElementById("ar-encounter-hud").style.display = "none";
+    document.getElementById("live-battle-hud").style.display = "none";
+    A.playPokemonCry(oldSpeciesId);
+  }
+
+  function renderEvolutionMorphCutscene(W, H, timeSec) {
+    if (!evoCutscene) return;
+    const ev = evoCutscene;
+    const t = ev.timer;
+
+    // Fundo Cósmico Turquesa/Azul Profundo da Evolução do Pokémon GO
+    const bg = ctx.createRadialGradient(W*0.5, H*0.48, 20, W*0.5, H*0.48, Math.max(W, H)*0.75);
+    bg.addColorStop(0, "#0ea5e9");
+    bg.addColorStop(0.5, "#0369a1");
+    bg.addColorStop(1, "#082f49");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const cx = W * 0.5, cy = H * 0.48;
+    const baseSize = Math.min(W * 0.58, H * 0.38);
+
+    // Pedestal Holográfico 3D e Dupla-Hélice DNA de Caracteres ASCII Subindo!
+    ctx.save();
+    ctx.strokeStyle = "rgba(186, 230, 253, 0.75)";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(cx, cy + baseSize*0.48, baseSize*0.52, baseSize*0.16, 0, 0, Math.PI*2); ctx.stroke();
+
+    ctx.font = "bold 16px 'Cascadia Mono', Consolas, monospace";
+    const dnaChars = "✦*+@#ATGC";
+    for (let i = 0; i < 24; ++i) {
+      const py = cy + baseSize*0.45 - ((t * 140 + i * 18) % (baseSize * 1.25));
+      const phase = t * 6 + i * 0.55;
+      const px1 = cx + Math.sin(phase) * (baseSize * 0.42);
+      const px2 = cx - Math.sin(phase) * (baseSize * 0.42);
+      ctx.fillStyle = "#7dd3fc";
+      ctx.fillText(dnaChars[i % dnaChars.length], px1, py);
+      ctx.fillStyle = "#fde047";
+      ctx.fillText(dnaChars[(i+3) % dnaChars.length], px2, py);
+    }
+    ctx.restore();
+
+    const oldSculp = E.getPokemonAscii3DSculpture(ev.oldId, ev.isShiny, false);
+    const newSculp = E.getPokemonAscii3DSculpture(ev.newId, ev.isShiny, false);
+
+    if (t < 1.1) {
+      // Fase 1 (0.0s .. 1.1s): Pokémon original começa a brilhar com energia evolutiva
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.drawImage(oldSculp, -baseSize*0.5, -baseSize*0.5, baseSize, baseSize);
+      const glowAlpha = Math.min(0.85, t / 1.1);
+      ctx.globalCompositeOperation = "source-atop";
+      ctx.fillStyle = `rgba(224, 242, 254, ${glowAlpha})`;
+      ctx.fillRect(-baseSize*0.5, -baseSize*0.5, baseSize, baseSize);
+      ctx.restore();
+    } else if (t < 3.8) {
+      // Fase 2 (1.1s .. 3.8s): MORPH ACELERADO DE SILHUETA!
+      // A silhueta luminosa interpola e oscila cada vez mais rápido entre a forma antiga e a forma evoluída!
+      const mt = (t - 1.1) / 2.7; // 0.0 -> 1.0
+      const osc = 0.5 + 0.5 * Math.sin(mt * mt * 48.0);
+      const blendNew = Math.min(1.0, Math.max(0.0, mt * 0.65 + osc * 0.55));
+      const blendOld = 1.0 - blendNew;
+
+      // Raios solares saindo do núcleo do Morph
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.lineWidth = 4;
+      for (let r = 0; r < 12; ++r) {
+        const a = (r / 12) * Math.PI * 2 + t * 2.5;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(a) * baseSize * 0.9, Math.sin(a) * baseSize * 0.9);
+        ctx.stroke();
+      }
+
+      // Desenha Forma Antiga em Silhueta Branca/Ciano com escala comprimindo/esticando
+      if (blendOld > 0.04) {
+        ctx.save();
+        ctx.globalAlpha = blendOld;
+        const sOld = baseSize * (0.85 + 0.20 * blendOld);
+        ctx.drawImage(oldSculp, -sOld*0.5, -sOld*0.5, sOld, sOld);
+        ctx.globalCompositeOperation = "source-atop";
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(-sOld*0.5, -sOld*0.5, sOld, sOld);
+        ctx.restore();
+      }
+
+      // Desenha Forma Nova Evoluída em Silhueta Branca/Ciano emergindo do Morph!
+      if (blendNew > 0.04) {
+        ctx.save();
+        ctx.globalAlpha = blendNew;
+        const sNew = baseSize * (0.88 + 0.26 * blendNew);
+        ctx.drawImage(newSculp, -sNew*0.5, -sNew*0.5, sNew, sNew);
+        ctx.globalCompositeOperation = "source-atop";
+        ctx.fillStyle = "#e0f2fe";
+        ctx.fillRect(-sNew*0.5, -sNew*0.5, sNew, sNew);
+        ctx.restore();
+      }
+      ctx.restore();
+    } else {
+      // Fase 3 (3.8s .. 5.2s): Clarão Supernova + Revelação em Cores 3D do Novo Pokémon Evoluído!
+      if (!ev.cryPlayed) {
+        ev.cryPlayed = true;
+        A.playGotchaFanfare();
+        A.playPokemonCry(ev.newId);
+      }
+      const rt = (t - 3.8) / 1.4;
+      const sFinal = baseSize * 1.15;
+      const bounce = Math.abs(Math.sin(rt * Math.PI * 2)) * 22 * (1 - rt * 0.5);
+
+      ctx.save();
+      ctx.translate(cx, cy - bounce);
+      ctx.drawImage(newSculp, -sFinal*0.5, -sFinal*0.5, sFinal, sFinal);
+      ctx.restore();
+
+      // Anel de choque da Supernova
+      if (rt < 0.7) {
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 255, 255, ${1 - rt / 0.7})`;
+        ctx.lineWidth = 12 * (1 - rt / 0.7);
+        ctx.beginPath(); ctx.arc(cx, cy, rt * W * 0.8, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Banner inferior da Cutscene de Evolução
+    ctx.save();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+    ctx.beginPath(); ctx.roundRect(W*0.5 - 175, H - 96, 350, 58, 18); ctx.fill();
+    ctx.fillStyle = "#254a52";
+    ctx.font = "800 15px -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    if (t < 3.8) {
+      ctx.fillText(`O quê? ${ev.oldName} está evoluindo!`, W*0.5, H - 62);
+    } else {
+      ctx.fillStyle = "#1c8c82";
+      ctx.fillText(`✨ Parabéns! Seu ${ev.oldName} evoluiu`, W*0.5, H - 72);
+      ctx.fillStyle = "#254a52";
+      ctx.fillText(`para ${ev.newName.toUpperCase()} (CP ${ev.newCp})!`, W*0.5, H - 50);
+    }
+    ctx.restore();
   }
 
   function setBuddyPokemon(uid) {
@@ -2015,6 +2587,17 @@ window.PokeGameUI = (function() {
         }
       }
 
+      if (gameScene === "LIVE_BATTLE") {
+        if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy)) {
+          triggerBattleDodge(dx > 0 ? 1 : -1);
+        } else {
+          triggerPlayerAttack(false);
+        }
+        dragStart = null;
+        prevAngle = null;
+        return;
+      }
+
       if (gameScene === "AR_CAPTURE" && dy < -35 && dtMs < 750) {
         const speed = Math.min(10.5, Math.max(6.0, (-dy / dtMs) * 7.4));
         const yawOff = (dx / window.innerWidth) * 0.85;
@@ -2111,6 +2694,16 @@ window.PokeGameUI = (function() {
 
       updateCityMovement(dt);
       updateCaptureAndWildPhysics(dt, timeSec);
+      updateLiveBattlePhysics(dt);
+      if (gameScene === "EVOLUTION_CUTSCENE" && evoCutscene) {
+        evoCutscene.timer += dt;
+        if (evoCutscene.timer >= evoCutscene.duration) {
+          const finishedUid = evoCutscene.uid;
+          evoCutscene = null;
+          toggleSceneMode("CITY_MAP");
+          showPokemonDetailCardModal(finishedUid);
+        }
+      }
       renderMainViewport(timeSec);
 
       requestAnimationFrame(loop);
@@ -2161,7 +2754,10 @@ window.PokeGameUI = (function() {
     useBagItem,
     showBattleHubModal,
     startBattle,
-    executeBattleTurn,
+    fleeLiveBattle,
+    triggerPlayerAttack,
+    triggerBattleDodge,
+    triggerBattleShield,
     showBattlePassModal,
     claimBattlePassTier,
     showSystemAndCrowdfundingModal,
