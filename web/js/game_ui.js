@@ -1402,6 +1402,83 @@ window.PokeGameUI = (function() {
   }
 
   // ============================================================================
+  // SOMBRAS DE CONTATO NO CHÃO (grade 512x512 a 0,25 m, estampada a cada frame)
+  // Cada entidade estampa discos suaves ao longo da direção oposta ao sol; o fundo só consulta a grade
+  // (bilinear), então o custo é pequeno e a sombra fica colada ao chão em qualquer zoom.
+  // ============================================================================
+  const SHADOW_N = 512;
+  const SHADOW_STEP = 0.25;
+  const SHADOW_INV = 1 / SHADOW_STEP;
+  const shadowGrid = new Uint8Array(SHADOW_N * SHADOW_N);
+  let shadowMinX = 0, shadowMinZ = 0, shadowCount = 0;
+  const SUN_DIR = E.norm3({ x: 0.45, y: 0.82, z: 0.35 });
+  const SHADOW_SLANT_X = -SUN_DIR.x / SUN_DIR.y, SHADOW_SLANT_Z = -SUN_DIR.z / SUN_DIR.y;
+
+  // Raio e altura aproximados da malha (calculados uma vez por malha; malhas em cache reaproveitam).
+  function meshShadowInfo(mesh) {
+    let si = mesh._shadowInfo;
+    if (si) return si;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, maxY = 0.1;
+    const verts = mesh.verts;
+    for (let i = 0; i < verts.length; ++i) {
+      const p = verts[i].pos;
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const rx = Math.max(0.05, (maxX - minX) * 0.5), rz = Math.max(0.05, (maxZ - minZ) * 0.5);
+    si = { r: Math.sqrt(rx * rz) * 0.9, h: maxY };
+    mesh._shadowInfo = si;
+    return si;
+  }
+
+  function stampShadowDisc(cx, cz, R, strength) {
+    const R2 = R * R;
+    const gx0 = Math.max(0, Math.floor((cx - R - shadowMinX) * SHADOW_INV));
+    const gx1 = Math.min(SHADOW_N - 1, Math.ceil((cx + R - shadowMinX) * SHADOW_INV));
+    const gz0 = Math.max(0, Math.floor((cz - R - shadowMinZ) * SHADOW_INV));
+    const gz1 = Math.min(SHADOW_N - 1, Math.ceil((cz + R - shadowMinZ) * SHADOW_INV));
+    for (let gz = gz0; gz <= gz1; ++gz) {
+      const dz = shadowMinZ + (gz + 0.5) * SHADOW_STEP - cz;
+      const row = gz * SHADOW_N;
+      for (let gx = gx0; gx <= gx1; ++gx) {
+        const dx = shadowMinX + (gx + 0.5) * SHADOW_STEP - cx;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= R2) continue;
+        const f = 1.0 - d2 / R2;
+        const q = (strength * f * 255) | 0;
+        if (q > shadowGrid[row + gx]) shadowGrid[row + gx] = q;
+      }
+    }
+  }
+
+  function buildShadowGrid(drawCmds, centerX, centerZ) {
+    shadowGrid.fill(0);
+    shadowMinX = Math.round(centerX) - SHADOW_N * SHADOW_STEP * 0.5;
+    shadowMinZ = Math.round(centerZ) - SHADOW_N * SHADOW_STEP * 0.5;
+    let n = 0;
+    for (let ci = 0; ci < drawCmds.length; ++ci) {
+      const cmd = drawCmds[ci];
+      const id = cmd.id;
+      if (id === 7 || id === 2 || id === 3) continue; // anéis e pokébola não projetam sombra
+      const m = cmd.model;
+      const sc = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+      if (!(sc > 0)) continue;
+      const si = meshShadowInfo(cmd.mesh);
+      const R = si.r * sc * 1.3 + 0.2;
+      const len = Math.min(si.h * sc * 0.5, R * 2.4);
+      const x = m[12], z = m[14];
+      // 3 discos ao longo da direção da sombra (pé -> ponta), mais fracos e finos na ponta
+      for (let k = 0; k < 3; ++k) {
+        const t = k * 0.5;
+        stampShadowDisc(x + SHADOW_SLANT_X * len * t, z + SHADOW_SLANT_Z * len * t, R * (1.0 - 0.28 * t), 1.0 - 0.32 * t);
+      }
+      ++n;
+    }
+    shadowCount = n;
+  }
+
+  // ============================================================================
   // ESTÁGIO 1 DO PIPELINE 100% ASCII: FUNDO / CÂMERA AO VIVO / CHÃO 3D + SOBEL
   // Usa a EXATA MESMA base ortonormal (camBasis.s, camBasis.u, camBasis.f, camBasis.eye)
   // da matriz de projeção 3D para que o chão e todos os objetos 3D fiquem 100% soldados!
@@ -1454,6 +1531,7 @@ window.PokeGameUI = (function() {
       const s = camBasis.s, u = camBasis.u, f = camBasis.f, eye = camBasis.eye;
       const isCity = gameScene === "CITY_MAP";
       const isBattle = gameScene === "LIVE_BATTLE";
+      const hasShadow = shadowCount > 0;
       const ndcStep = (2.0 * aspect * fovScale) / sw;
       const ndcX0 = (1.0 / sw - 1.0) * aspect * fovScale;
 
@@ -1472,6 +1550,14 @@ window.PokeGameUI = (function() {
           for (let x = 0; x < sw; ++x) {
             const idx = rowOff + x;
             let R = bR, G = bG, B = bB;
+            if (skyT > 0.3) {
+              // Estrelas cintilantes (hash por amostra): ~0,3% das amostras do céu alto
+              const hs = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663)) >>> 0;
+              if ((hs & 1023) < 3) {
+                const tw = (0.5 + 0.5 * Math.sin(timeSec * 3.0 + (hs >>> 10))) * 0.6 * skyT;
+                R += tw; G += tw; B += tw * 1.1;
+              }
+            }
             if (isBattle) {
               const stadiumGlow = Math.max(0, Math.sin((x / ssx) * 0.22 + timeSec * 2)) * glowK;
               R += stadiumGlow; G += stadiumGlow * 0.8; B += stadiumGlow * 1.2;
@@ -1552,6 +1638,23 @@ window.PokeGameUI = (function() {
             camG[idx] = (checker * 1.40) * fog + 0.32 * invFog;
             camB[idx] = (checker * 0.68) * fog + 0.35 * invFog;
           }
+
+          if (hasShadow) {
+            // Sombra de contato: consulta bilinear na grade; escurece mais o vermelho que o azul (sombra fria)
+            const fxg = (wx - shadowMinX) * SHADOW_INV - 0.5, fzg = (wz - shadowMinZ) * SHADOW_INV - 0.5;
+            const ix = Math.floor(fxg), iz = Math.floor(fzg);
+            if (ix >= 0 && iz >= 0 && ix < SHADOW_N - 1 && iz < SHADOW_N - 1) {
+              const tx = fxg - ix, tz = fzg - iz;
+              const i0 = iz * SHADOW_N + ix;
+              const d = ((shadowGrid[i0] * (1 - tx) + shadowGrid[i0 + 1] * tx) * (1 - tz) +
+                         (shadowGrid[i0 + SHADOW_N] * (1 - tx) + shadowGrid[i0 + SHADOW_N + 1] * tx) * tz) * (1 / 255);
+              if (d > 0.004) {
+                camR[idx] *= 1 - d * 0.80;
+                camG[idx] *= 1 - d * 0.72;
+                camB[idx] *= 1 - d * 0.52;
+              }
+            }
+          }
         }
       }
     }
@@ -1613,10 +1716,6 @@ window.PokeGameUI = (function() {
     } else {
       camBasis = E.mat4LookAtBasis({ x: 0.0, y: 0.15, z: 0.0 }, { x: 0.0, y: -0.35, z: -4.2 });
     }
-
-    const tB0 = performance.now();
-    renderBackdropSamples(timeSec, camBasis, fovY, aspect);
-    perfMs.backdrop += (performance.now() - tB0 - perfMs.backdrop) * 0.1;
 
     const proj = E.mat4Perspective(fovY, aspect, 0.25, 180.0);
     const vp = E.mat4Mul(proj, camBasis.view);
@@ -1970,6 +2069,20 @@ window.PokeGameUI = (function() {
       }
     }
 
+    // Fundo/chão por último entre os preparos: precisa das entidades para estampar as sombras de contato
+    const tB0 = performance.now();
+    if (gameScene === "CITY_MAP") {
+      buildShadowGrid(drawCmds, cityState.playerX, cityState.playerZ);
+    } else if (drawCmds.length > 0) {
+      let ax = 0, az = 0;
+      for (let i = 0; i < drawCmds.length; ++i) { ax += drawCmds[i].model[12]; az += drawCmds[i].model[14]; }
+      buildShadowGrid(drawCmds, ax / drawCmds.length, az / drawCmds.length);
+    } else {
+      shadowCount = 0;
+    }
+    renderBackdropSamples(timeSec, camBasis, fovY, aspect);
+    perfMs.backdrop += (performance.now() - tB0 - perfMs.backdrop) * 0.1;
+
     // Luz Direcional Sol + Rim Light 3D
     const lightDir = E.norm3({ x: 0.45, y: 0.82, z: 0.35 });
     const ldx = lightDir.x, ldy = lightDir.y, ldz = lightDir.z;
@@ -2156,9 +2269,10 @@ window.PokeGameUI = (function() {
               gbColB[idx] = 1.0;
               gbLight[idx] = 1.35;
             } else {
-              gbColR[idx] = texR;
-              gbColG[idx] = texG;
-              gbColB[idx] = texB;
+              // Sol quente nas faces iluminadas, céu frio nas sombras (dá volume e "clima" à luz)
+              gbColR[idx] = texR * (0.90 + 0.20 * ndotl);
+              gbColG[idx] = texG * (0.97 + 0.07 * ndotl);
+              gbColB[idx] = texB * (1.10 - 0.24 * ndotl);
             }
           }
         }
