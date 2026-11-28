@@ -21,9 +21,16 @@ window.PokeGameUI = (function() {
   let cellW = 10, cellH = 16;
   let fontLoaded = false;
 
-  // Buffers do G-Buffer 3D e do Pós-Processador ASCII
-  let camLuma, camR, camG, camB, camCellType, edgeMag, edgeDir;
-  let gbZ, gbId, gbNx, gbNy, gbNz, gbColR, gbColG, gbColB, gbLight;
+  // Subamostragem dentro da célula: o G-Buffer e o fundo são calculados em (cols*ssx) x (rows*ssy)
+  // amostras e cada célula escolhe o glifo que melhor casa com o padrão de forma das suas amostras.
+  // Assim o detalhe vem dos PIXELS (geometria/ruas/texturas) e não do número de células, ficando
+  // independente do zoom (zoom-out agrupa mais mundo por célula, mas a forma continua resolvida).
+  let ssx = 1, ssy = 1;
+  let sw = 0, sh = 0;
+
+  // Buffers do G-Buffer 3D (resolução de amostra) e do fundo
+  let camR, camG, camB, camCellType;
+  let gbZ, gbId, gbNx, gbNy, gbColR, gbColG, gbColB, gbLight;
 
   // Biblioteca de Icones Vetoriais SVG Inline (Zero Emojis em todo o App!)
   function svgIcon(name, size = 16, color = "currentColor") {
@@ -195,9 +202,30 @@ window.PokeGameUI = (function() {
   let qualityTier = isMobileDevice ? 2 : 3;
 
   // Atlas Bitmap Anti-Aliased de Glifos ASCII + ImageData Uint32Array (30x mais rápido que fillText no Mobile!)
-  const GLYPH_CHARS = " .',:;!~+-=*oO08#%W@|/\\·=";
+  // Conjunto de glifos usado tanto para sombreamento (rampa de densidade) quanto para o casamento
+  // de forma por célula (bordas | / \ - _, cantos ( ) [ ], pontos . ' ` etc.).
+  const GLYPH_CHARS = " .'`,:;!|/\\-_=+~^\"<>()[]*oO0#%@WM8&X$L7TYV·";
   const CHAR_TO_IDX = new Map();
   for (let i = 0; i < GLYPH_CHARS.length; ++i) CHAR_TO_IDX.set(GLYPH_CHARS[i], i);
+  const SHADE_RAMP = " .',:;!~+-=*oO08#%W@";
+  const SHADE_IDX = Array.from(SHADE_RAMP, (ch) => CHAR_TO_IDX.get(ch));
+  const GI_EQ = CHAR_TO_IDX.get("="), GI_HASH = CHAR_TO_IDX.get("#"), GI_PLUS = CHAR_TO_IDX.get("+");
+  const GI_COLON = CHAR_TO_IDX.get(":"), GI_DOT = CHAR_TO_IDX.get("."), GI_COMMA = CHAR_TO_IDX.get(",");
+  const GI_MIDDOT = CHAR_TO_IDX.get("·");
+
+  // Níveis de subamostragem [ssx, ssy] por célula. 0 = legado (1 amostra/célula).
+  const SS_LEVELS = [[1, 1], [2, 2], [2, 3]];
+  let ssLevel = isMobileDevice ? 1 : 2;
+  let governorEnabled = true;       // governador de FPS automático (desligado por setSubsampling)
+  const GOVERNOR_GRACE_MS = 6000;   // ignora quedas de FPS durante o carregamento inicial (GLB/texturas)
+  let ssCeiling = SS_LEVELS.length - 1, goodFpsSeconds = 0, ssUpgradedAt = -1e9;
+  const CONTRAST_MIN = 0.16;        // contraste mínimo de "tinta" na célula para usar casamento de forma
+  const MAX_SS_SAMPLES = 6;
+  const SCR_R = new Float32Array(MAX_SS_SAMPLES), SCR_G = new Float32Array(MAX_SS_SAMPLES);
+  const SCR_B = new Float32Array(MAX_SS_SAMPLES), SCR_INK = new Float32Array(MAX_SS_SAMPLES);
+  let glyphShape = null;            // Float32Array(G * S): cobertura normalizada de cada glifo por sub-bloco
+  let glyphUsable = null;           // Uint8Array(G): glifo tem contraste interno suficiente
+  let shapeCache = null;            // Uint8Array(4^S): chave de padrão quantizado -> índice do glifo (255 = vazio)
   let glyphAtlas = null;
   let frameImageData = null;
   let framePixels32 = null;
@@ -230,22 +258,73 @@ window.PokeGameUI = (function() {
     }
   }
 
+  // Pré-computa, para cada glifo, a cobertura média de tinta em cada sub-bloco ssx x ssy da célula
+  // (normalizada 0..1). O casamento de forma compara o padrão de amostras da célula com esses vetores.
+  function buildGlyphShapes(cw, ch) {
+    const G = GLYPH_CHARS.length, S = ssx * ssy;
+    glyphShape = new Float32Array(G * S);
+    glyphUsable = new Uint8Array(G);
+    shapeCache = new Uint8Array(1 << (2 * S)).fill(255);
+    const tmp = new Float32Array(S);
+    for (let gi = 1; gi < G; ++gi) {
+      const mask = glyphAtlas[gi];
+      let mn = 1e9, mx = -1e9, k = 0;
+      for (let sy = 0; sy < ssy; ++sy) {
+        const y0 = Math.floor(sy * ch / ssy);
+        const y1 = Math.max(y0 + 1, Math.floor((sy + 1) * ch / ssy));
+        for (let sx = 0; sx < ssx; ++sx, ++k) {
+          const x0 = Math.floor(sx * cw / ssx);
+          const x1 = Math.max(x0 + 1, Math.floor((sx + 1) * cw / ssx));
+          let sum = 0, cnt = 0;
+          for (let y = y0; y < y1 && y < ch; ++y) {
+            for (let x = x0; x < x1 && x < cw; ++x) { sum += mask[y * cw + x]; ++cnt; }
+          }
+          const cov = cnt > 0 ? Math.min(1, sum / (cnt * 255)) : 0;
+          tmp[k] = cov;
+          if (cov < mn) mn = cov;
+          if (cov > mx) mx = cov;
+        }
+      }
+      if (mx - mn < 0.12) continue; // glifo quase uniforme: só serve para rampa de densidade
+      glyphUsable[gi] = 1;
+      for (let q = 0; q < S; ++q) glyphShape[gi * S + q] = (tmp[q] - mn) / (mx - mn);
+    }
+  }
+
+  // Melhor glifo (menor erro quadrático) para um padrão quantizado em 4 níveis por amostra.
+  function matchGlyphKey(key) {
+    const S = ssx * ssy, G = GLYPH_CHARS.length;
+    let best = SHADE_IDX[8], bestD = 1e9;
+    for (let gi = 1; gi < G; ++gi) {
+      if (!glyphUsable[gi]) continue;
+      let d = 0;
+      const base = gi * S;
+      for (let k = 0; k < S; ++k) {
+        const t = ((key >> (k * 2)) & 3) * (1 / 3);
+        const diff = t - glyphShape[base + k];
+        d += diff * diff;
+      }
+      if (d < bestD) { bestD = d; best = gi; }
+    }
+    return best;
+  }
+
   function allocateAsciiBuffers(c, r) {
     cols = c; rows = r;
-    const n = cols * rows;
-    camLuma = new Float32Array(n);
+    ssx = SS_LEVELS[ssLevel][0];
+    ssy = SS_LEVELS[ssLevel][1];
+    sw = cols * ssx;
+    sh = rows * ssy;
+    const n = sw * sh;
     camR = new Float32Array(n);
     camG = new Float32Array(n);
     camB = new Float32Array(n);
     camCellType = new Uint8Array(n);
-    edgeMag = new Float32Array(n);
-    edgeDir = new Uint8Array(n);
 
     gbZ = new Float32Array(n);
     gbId = new Int32Array(n);
     gbNx = new Float32Array(n);
     gbNy = new Float32Array(n);
-    gbNz = new Float32Array(n);
     gbColR = new Float32Array(n);
     gbColG = new Float32Array(n);
     gbColB = new Float32Array(n);
@@ -290,6 +369,7 @@ window.PokeGameUI = (function() {
     canvas.height = newRows * cellH;
     allocateAsciiBuffers(newCols, newRows);
     buildGlyphAtlas(cellW, cellH);
+    buildGlyphShapes(cellW, cellH);
 
     try {
       if (typeof ctx.createImageData === "function") {
@@ -305,8 +385,8 @@ window.PokeGameUI = (function() {
     }
 
     if (sampleCanvas) {
-      sampleCanvas.width = newCols;
-      sampleCanvas.height = newRows;
+      sampleCanvas.width = sw;
+      sampleCanvas.height = sh;
     }
     fontLoaded = false;
   }
@@ -1264,7 +1344,7 @@ window.PokeGameUI = (function() {
   // Usa a EXATA MESMA base ortonormal (camBasis.s, camBasis.u, camBasis.f, camBasis.eye)
   // da matriz de projeção 3D para que o chão e todos os objetos 3D fiquem 100% soldados!
   // ============================================================================
-  function captureCameraAndComputeSobel(timeSec, camBasis, fovY, aspect) {
+  function renderBackdropSamples(timeSec, camBasis, fovY, aspect) {
     camCellType.fill(0);
     if (
       gameScene === "CITY_MAP" &&
@@ -1276,159 +1356,140 @@ window.PokeGameUI = (function() {
     const osmMinWX = osmGridCenterX - (OSM_GRID_SIZE * OSM_GRID_STEP) * 0.5;
     const osmMinWZ = osmGridCenterZ - (OSM_GRID_SIZE * OSM_GRID_STEP) * 0.5;
     const hasOsm = cityState.osmRoads.length > 0;
+    const n = sw * sh;
+
     if (useRealCamera && gameScene === "AR_CAPTURE" && videoEl && videoEl.readyState >= 2) {
-      sampleCtx.drawImage(videoEl, 0, 0, cols, rows);
-      const img = sampleCtx.getImageData(0, 0, cols, rows).data;
-      for (let i = 0, p = 0; i < cols * rows; ++i, p += 4) {
-        const r = img[p] / 255, g = img[p + 1] / 255, b = img[p + 2] / 255;
-        camR[i] = r; camG[i] = g; camB[i] = b;
-        camLuma[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+      // Câmera real amostrada diretamente na resolução de sub-amostra (detalhe real, não 1 pixel/célula)
+      sampleCtx.drawImage(videoEl, 0, 0, sw, sh);
+      const img = sampleCtx.getImageData(0, 0, sw, sh).data;
+      for (let i = 0, p = 0; i < n; ++i, p += 4) {
+        camR[i] = img[p] * (1 / 255);
+        camG[i] = img[p + 1] * (1 / 255);
+        camB[i] = img[p + 2] * (1 / 255);
       }
     } else if (gameScene === "EVOLUTION_CUTSCENE") {
-      // Câmara Cósmica 3D de Evolução em ASCII
-      for (let r = 0; r < rows; ++r) {
-        const ny = r / rows;
-        for (let c = 0; c < cols; ++c) {
-          const idx = r * cols + c;
-          const nx = (c / cols) - 0.5;
+      // Câmara Cósmica 3D de Evolução em ASCII (padrões em unidades de célula, iguais em qualquer ss)
+      for (let y = 0; y < sh; ++y) {
+        const ny = y / sh;
+        const rCell = y / ssy;
+        for (let x = 0; x < sw; ++x) {
+          const idx = y * sw + x;
+          const nx = (x / sw) - 0.5;
+          const cCell = x / ssx;
           const beam = Math.exp(-nx * nx * 14.0) * (0.45 + 0.25 * Math.sin(ny * 22 - timeSec * 8));
-          const wave = 0.08 * Math.sin(c * 0.35 + timeSec * 4) * Math.cos(r * 0.3 - timeSec * 3);
-          const R = Math.min(1, 0.06 + beam * 0.45 + wave);
-          const G = Math.min(1, 0.14 + beam * 0.85 + Math.max(0, wave));
-          const B = Math.min(1, 0.32 + beam * 1.10);
-          camR[idx] = R; camG[idx] = G; camB[idx] = B;
-          camLuma[idx] = 0.299 * R + 0.587 * G + 0.114 * B;
+          const wave = 0.08 * Math.sin(cCell * 0.35 + timeSec * 4) * Math.cos(rCell * 0.3 - timeSec * 3);
+          camR[idx] = Math.min(1, 0.06 + beam * 0.45 + wave);
+          camG[idx] = Math.min(1, 0.14 + beam * 0.85 + Math.max(0, wave));
+          camB[idx] = Math.min(1, 0.32 + beam * 1.10);
         }
       }
     } else {
-      // Raycast 3D do Céu e do Chão matematicamente idêntico à View-Projection 3D!
+      // Raycast 3D do Céu e do Chão por AMOSTRA, matematicamente idêntico à View-Projection 3D.
+      // A base do LookAt tem s.y == 0 (sem roll), logo a componente Y do raio e o tHit são constantes
+      // em cada linha de amostras: o custo por amostra é só um incremento linear em X/Z.
       const groundY = -1.25;
       const fovScale = Math.tan(fovY * 0.5);
       const s = camBasis.s, u = camBasis.u, f = camBasis.f, eye = camBasis.eye;
+      const isCity = gameScene === "CITY_MAP";
+      const isBattle = gameScene === "LIVE_BATTLE";
+      const ndcStep = (2.0 * aspect * fovScale) / sw;
+      const ndcX0 = (1.0 / sw - 1.0) * aspect * fovScale;
 
-      for (let r = 0; r < rows; ++r) {
-        const ndcY = (1.0 - 2.0 * ((r + 0.5) / rows)) * fovScale;
-        for (let c = 0; c < cols; ++c) {
-          const idx = r * cols + c;
-          const ndcX = (2.0 * ((c + 0.5) / cols) - 1.0) * aspect * fovScale;
+      for (let y = 0; y < sh; ++y) {
+        const ndcY = (1.0 - 2.0 * ((y + 0.5) / sh)) * fovScale;
+        const ryW = f.y + ndcY * u.y;
+        const rowOff = y * sw;
 
-          // Raio no mundo = f + ndcX * s + ndcY * u (inversa exata de mat4Perspective * mat4LookAtBasis!)
-          const rxW = f.x + ndcX * s.x + ndcY * u.x;
-          const ryW = f.y + ndcX * s.y + ndcY * u.y;
-          const rzW = f.z + ndcX * s.z + ndcY * u.z;
-
-          if (ryW >= -0.008) {
-            // Céu Crepuscular Pokémon GO (Ref: 22.18.13 (2).jpeg)
-            const skyT = Math.min(1, Math.max(0, ryW * 2.2));
-            let R = 0.78 * (1 - skyT) + 0.14 * skyT;
-            let G = 0.48 * (1 - skyT) + 0.22 * skyT;
-            let B = 0.56 * (1 - skyT) + 0.52 * skyT;
-            if (gameScene === "LIVE_BATTLE") {
-              const stadiumGlow = Math.max(0, Math.sin(c * 0.22 + timeSec * 2)) * (1 - skyT) * 0.25;
+        if (ryW >= -0.008) {
+          // Céu Crepuscular Pokémon GO
+          const skyT = Math.min(1, Math.max(0, ryW * 2.2));
+          const bR = 0.78 * (1 - skyT) + 0.14 * skyT;
+          const bG = 0.48 * (1 - skyT) + 0.22 * skyT;
+          const bB = 0.56 * (1 - skyT) + 0.52 * skyT;
+          const glowK = (1 - skyT) * 0.25;
+          for (let x = 0; x < sw; ++x) {
+            const idx = rowOff + x;
+            let R = bR, G = bG, B = bB;
+            if (isBattle) {
+              const stadiumGlow = Math.max(0, Math.sin((x / ssx) * 0.22 + timeSec * 2)) * glowK;
               R += stadiumGlow; G += stadiumGlow * 0.8; B += stadiumGlow * 1.2;
             }
             camR[idx] = Math.min(1, R);
             camG[idx] = Math.min(1, G);
             camB[idx] = Math.min(1, B);
-            camLuma[idx] = 0.299 * R + 0.587 * G + 0.114 * B;
-          } else {
-            const tHit = (groundY - eye.y) / ryW;
-            const wx = eye.x + rxW * tHit;
-            const wz = eye.z + rzW * tHit;
-            const fog = Math.exp(-Math.max(0, tHit) * 0.015);
-
-            if (gameScene === "CITY_MAP") {
-              // Paleta Oficial do Mapa Pokémon GO com Ruas, Faixas Centrais, Meio-Fio Salmão e Plantas Baixas Planas
-              let gR = 0.12, gG = 0.19, gB = 0.42; // Terreno Índigo (#1f306b)
-              const checker = ((Math.floor(wx * 0.5) + Math.floor(wz * 0.5)) & 1);
-              if (checker) { gR += 0.02; gG += 0.025; gB += 0.04; }
-
-              let ct = 0;
-              if (hasOsm) {
-                const gx = Math.floor((wx - osmMinWX) / OSM_GRID_STEP);
-                const gz = Math.floor((wz - osmMinWZ) / OSM_GRID_STEP);
-                if (gx >= 0 && gx < OSM_GRID_SIZE && gz >= 0 && gz < OSM_GRID_SIZE) {
-                  ct = osmGroundGrid[(gz << 8) | gx];
-                }
-              } else {
-                const roadX = Math.abs((wx % 12 + 12) % 12 - 6);
-                const roadZ = Math.abs((wz % 12 + 12) % 12 - 6);
-                if (roadX < 0.12 || roadZ < 0.12) {
-                  ct = 2; // Faixa central
-                } else if (roadX < 1.35 || roadZ < 1.35) {
-                  ct = 1; // Asfalto
-                } else if (roadX < 1.68 || roadZ < 1.68) {
-                  ct = 3; // Meio-fio salmão
-                } else if (roadX >= 2.5 && roadX <= 5.1 && roadZ >= 2.5 && roadZ <= 5.1) {
-                  const isWall = (roadX < 2.75 || roadX > 4.85 || roadZ < 2.75 || roadZ > 4.85);
-                  ct = isWall ? 5 : 4; // Planta baixa de edifício desenhada plana no chão!
-                }
-              }
-
-              camCellType[idx] = ct;
-              if (ct === 2) {
-                gR = 0.25; gG = 0.78; gB = 0.92;
-              } else if (ct === 1) {
-                gR = 0.07; gG = 0.12; gB = 0.30;
-              } else if (ct === 3) {
-                gR = 0.72; gG = 0.45; gB = 0.50;
-              } else if (ct === 5) {
-                // Contorno arquitetônico plano do prédio no chão
-                gR = 0.34; gG = 0.52; gB = 0.84;
-              } else if (ct === 4) {
-                // Interior plano do prédio no chão
-                gR = 0.18; gG = 0.27; gB = 0.54;
-              }
-
-              camR[idx] = gR * fog + 0.22 * (1 - fog);
-              camG[idx] = gG * fog + 0.24 * (1 - fog);
-              camB[idx] = gB * fog + 0.44 * (1 - fog);
-            } else if (gameScene === "LIVE_BATTLE") {
-              const arenaRing = Math.abs(Math.hypot(wx, wz + 3.8) - 3.2) < 0.22;
-              const centerLine = Math.abs(wz + 3.8) < 0.12 && Math.abs(wx) < 3.4;
-              let gR = 0.10, gG = 0.18, gB = 0.34;
-              if (arenaRing || centerLine) {
-                gR = 0.25; gG = 0.85; gB = 0.78;
-                camCellType[idx] = 2;
-              } else if (((Math.floor(wx) + Math.floor(wz)) & 1) === 0) {
-                gR = 0.13; gG = 0.22; gB = 0.40;
-              }
-              camR[idx] = gR * fog + 0.15 * (1 - fog);
-              camG[idx] = gG * fog + 0.22 * (1 - fog);
-              camB[idx] = gB * fog + 0.38 * (1 - fog);
-            } else {
-              const gx = Math.floor(wx * 1.4), gz = Math.floor(wz * 1.4);
-              const checker = ((gx + gz) & 1) ? 0.18 : 0.13;
-              const gR = (checker * 0.42) * fog + 0.15 * (1 - fog);
-              const gG = (checker * 1.40) * fog + 0.32 * (1 - fog);
-              const gB = (checker * 0.68) * fog + 0.35 * (1 - fog);
-              camR[idx] = gR; camG[idx] = gG; camB[idx] = gB;
-            }
-            camLuma[idx] = 0.299 * camR[idx] + 0.587 * camG[idx] + 0.114 * camB[idx];
           }
+          continue;
         }
-      }
-    }
 
-    // Filtro Sobel 3x3 no fundo para caracteres direcionais (| - / \)
-    edgeMag.fill(0);
-    edgeDir.fill(0);
-    for (let r = 1; r < rows - 1; ++r) {
-      for (let c = 1; c < cols - 1; ++c) {
-        const i = r * cols + c;
-        const gx = -camLuma[i - cols - 1] + camLuma[i - cols + 1]
-                   - 2 * camLuma[i - 1]   + 2 * camLuma[i + 1]
-                   - camLuma[i + cols - 1] + camLuma[i + cols + 1];
-        const gy = -camLuma[i - cols - 1] - 2 * camLuma[i - cols] - camLuma[i - cols + 1]
-                   + camLuma[i + cols - 1] + 2 * camLuma[i + cols] + camLuma[i + cols + 1];
-        const mag = Math.hypot(gx, gy);
-        edgeMag[i] = mag;
-        if (mag > 0.15) {
-          const deg = ((Math.atan2(gy, gx) * 180 / Math.PI) + 180) % 180;
-          if (deg < 22.5 || deg >= 157.5) edgeDir[i] = 1;      // '|'
-          else if (deg >= 67.5 && deg < 112.5) edgeDir[i] = 2; // '-'
-          else if (deg >= 22.5 && deg < 67.5) edgeDir[i] = 3;  // '/'
-          else edgeDir[i] = 4;                                 // '\'
+        const tHit = (groundY - eye.y) / ryW;
+        const fog = Math.exp(-Math.max(0, tHit) * 0.015);
+        const invFog = 1 - fog;
+        const bx = eye.x + (f.x + ndcY * u.x) * tHit;
+        const bz = eye.z + (f.z + ndcY * u.z) * tHit;
+        const dwx = s.x * tHit, dwz = s.z * tHit;
+
+        for (let x = 0; x < sw; ++x) {
+          const idx = rowOff + x;
+          const ndcX = ndcX0 + x * ndcStep;
+          const wx = bx + ndcX * dwx;
+          const wz = bz + ndcX * dwz;
+
+          if (isCity) {
+            // Paleta Oficial do Mapa Pokémon GO com Ruas, Faixas Centrais, Meio-Fio Salmão e Plantas Baixas Planas
+            let gR = 0.12, gG = 0.19, gB = 0.42; // Terreno Índigo (#1f306b)
+            if (((Math.floor(wx * 0.5) + Math.floor(wz * 0.5)) & 1) !== 0) { gR += 0.02; gG += 0.025; gB += 0.04; }
+
+            let ct = 0;
+            if (hasOsm) {
+              const gx = Math.floor((wx - osmMinWX) / OSM_GRID_STEP);
+              const gz = Math.floor((wz - osmMinWZ) / OSM_GRID_STEP);
+              if (gx >= 0 && gx < OSM_GRID_SIZE && gz >= 0 && gz < OSM_GRID_SIZE) {
+                ct = osmGroundGrid[(gz << 8) | gx];
+              }
+            } else {
+              const roadX = Math.abs((wx % 12 + 12) % 12 - 6);
+              const roadZ = Math.abs((wz % 12 + 12) % 12 - 6);
+              if (roadX < 0.12 || roadZ < 0.12) {
+                ct = 2; // Faixa central
+              } else if (roadX < 1.35 || roadZ < 1.35) {
+                ct = 1; // Asfalto
+              } else if (roadX < 1.68 || roadZ < 1.68) {
+                ct = 3; // Meio-fio salmão
+              } else if (roadX >= 2.5 && roadX <= 5.1 && roadZ >= 2.5 && roadZ <= 5.1) {
+                const isWall = (roadX < 2.75 || roadX > 4.85 || roadZ < 2.75 || roadZ > 4.85);
+                ct = isWall ? 5 : 4; // Planta baixa de edifício desenhada plana no chão!
+              }
+            }
+
+            camCellType[idx] = ct;
+            if (ct === 2) { gR = 0.25; gG = 0.78; gB = 0.92; }
+            else if (ct === 1) { gR = 0.07; gG = 0.12; gB = 0.30; }
+            else if (ct === 3) { gR = 0.72; gG = 0.45; gB = 0.50; }
+            else if (ct === 5) { gR = 0.34; gG = 0.52; gB = 0.84; }
+            else if (ct === 4) { gR = 0.18; gG = 0.27; gB = 0.54; }
+
+            camR[idx] = gR * fog + 0.22 * invFog;
+            camG[idx] = gG * fog + 0.24 * invFog;
+            camB[idx] = gB * fog + 0.44 * invFog;
+          } else if (isBattle) {
+            const arenaRing = Math.abs(Math.hypot(wx, wz + 3.8) - 3.2) < 0.22;
+            const centerLine = Math.abs(wz + 3.8) < 0.12 && Math.abs(wx) < 3.4;
+            let gR = 0.10, gG = 0.18, gB = 0.34;
+            if (arenaRing || centerLine) {
+              gR = 0.25; gG = 0.85; gB = 0.78;
+              camCellType[idx] = 2;
+            } else if (((Math.floor(wx) + Math.floor(wz)) & 1) === 0) {
+              gR = 0.13; gG = 0.22; gB = 0.40;
+            }
+            camR[idx] = gR * fog + 0.15 * invFog;
+            camG[idx] = gG * fog + 0.22 * invFog;
+            camB[idx] = gB * fog + 0.38 * invFog;
+          } else {
+            const checker = ((Math.floor(wx * 1.4) + Math.floor(wz * 1.4)) & 1) ? 0.18 : 0.13;
+            camR[idx] = (checker * 0.42) * fog + 0.15 * invFog;
+            camG[idx] = (checker * 1.40) * fog + 0.32 * invFog;
+            camB[idx] = (checker * 0.68) * fog + 0.35 * invFog;
+          }
         }
       }
     }
@@ -1441,6 +1502,9 @@ window.PokeGameUI = (function() {
   let vBufSx = new Float32Array(vBufCap);
   let vBufSy = new Float32Array(vBufCap);
   let vBufSz = new Float32Array(vBufCap);
+  let vBufIw = new Float32Array(vBufCap);
+  const TEX_SAMPLE_OUT = new Float32Array(6);
+  const perfMs = { backdrop: 0, sceneTotal: 0, resolve: 0 }; // médias móveis (ms) para diagnóstico
   let vBufOk = new Uint8Array(vBufCap);
   let vBufNx = new Float32Array(vBufCap);
   let vBufNy = new Float32Array(vBufCap);
@@ -1488,7 +1552,9 @@ window.PokeGameUI = (function() {
       camBasis = E.mat4LookAtBasis({ x: 0.0, y: 0.15, z: 0.0 }, { x: 0.0, y: -0.35, z: -4.2 });
     }
 
-    captureCameraAndComputeSobel(timeSec, camBasis, fovY, aspect);
+    const tB0 = performance.now();
+    renderBackdropSamples(timeSec, camBasis, fovY, aspect);
+    perfMs.backdrop += (performance.now() - tB0 - perfMs.backdrop) * 0.1;
 
     const proj = E.mat4Perspective(fovY, aspect, 0.25, 180.0);
     const vp = E.mat4Mul(proj, camBasis.view);
@@ -1498,8 +1564,9 @@ window.PokeGameUI = (function() {
 
     if (gameScene === "CITY_MAP") {
       const p = window.PokeStorage.getProfile();
-      // Compensação de escala inteligente em zoom distante para manter todos os modelos 3D nítidos!
-      const zoomComp = 1.0 + Math.max(0, (cityState.camOrbitDist - 10.0) * 0.032);
+      // Compensação de escala em zoom distante: o tamanho aparente (escala/distância) cai só ~15% em vez
+      // de ~55% até 55m, então avatar/Pokémon/PokéStops mantêm pixels suficientes para o detalhe aparecer.
+      const zoomComp = Math.pow(Math.max(1.0, cityState.camOrbitDist / 10.0), 0.85);
 
       // 1. ANEL 3D DE RAIO DE AÇÃO INVARIANTE À ROTAÇÃO DA CÂMERA (3.5m de raio no plano Y=-1.24)
       drawCmds.push({
@@ -1544,7 +1611,7 @@ window.PokeGameUI = (function() {
         drawCmds.push({ id: 11, mesh: bMesh, model: mBuddy, speciesId: buddyMon.speciesId });
       }
 
-      // (Edifícios permanecem desenhados apenas planos no chão em captureCameraAndComputeSobel, sem obstruir Ginásios!)
+      // (Edifícios permanecem desenhados apenas planos no chão em renderBackdropSamples, sem obstruir Ginásios!)
 
       // 4. POKÉSTOPS 3D
       cityState.pokestops.forEach((ps, idx) => {
@@ -1843,12 +1910,16 @@ window.PokeGameUI = (function() {
 
     // Luz Direcional Sol + Rim Light 3D
     const lightDir = E.norm3({ x: 0.45, y: 0.82, z: 0.35 });
+    const ldx = lightDir.x, ldy = lightDir.y, ldz = lightDir.z;
+    const texOut = TEX_SAMPLE_OUT;
+    // LOD de triângulos só no nível legado: com subamostragem, remover triângulos abre furos visíveis.
+    const allowLod = ssLevel === 0;
 
     for (const cmd of drawCmds) {
       const mvp = E.mat4Mul(vp, cmd.model);
       const m = cmd.model;
       const verts = cmd.mesh.verts;
-      const indices = (cmd.useLod && cmd.mesh.lodIndices) ? cmd.mesh.lodIndices : cmd.mesh.indices;
+      const indices = (allowLod && cmd.useLod && cmd.mesh.lodIndices) ? cmd.mesh.lodIndices : cmd.mesh.indices;
       const isClosedGlb = Boolean(cmd.mesh.isReal3DGlb);
       const vLen = verts.length;
 
@@ -1857,14 +1928,15 @@ window.PokeGameUI = (function() {
         vBufSx = new Float32Array(vBufCap);
         vBufSy = new Float32Array(vBufCap);
         vBufSz = new Float32Array(vBufCap);
+        vBufIw = new Float32Array(vBufCap);
         vBufOk = new Uint8Array(vBufCap);
         vBufNx = new Float32Array(vBufCap);
         vBufNy = new Float32Array(vBufCap);
         vBufNz = new Float32Array(vBufCap);
       }
 
-      // 1. Transforma todos os vértices da malha uma única vez por drawCmd (4x mais rápido que por triângulo!)
-      let meshMinX = cols, meshMaxX = -1, meshMinY = rows, meshMaxY = -1, anyVisible = false;
+      // 1. Transforma todos os vértices da malha uma única vez por drawCmd (coordenadas em AMOSTRAS)
+      let meshMinX = sw, meshMaxX = -1, meshMinY = sh, meshMaxY = -1, anyVisible = false;
       for (let vi = 0; vi < vLen; ++vi) {
         const v = verts[vi];
         const px = v.pos.x, py = v.pos.y, pz = v.pos.z;
@@ -1879,11 +1951,12 @@ window.PokeGameUI = (function() {
         const cx = mvp[0] * px + mvp[4] * py + mvp[8] * pz + mvp[12];
         const cy = mvp[1] * px + mvp[5] * py + mvp[9] * pz + mvp[13];
         const cz = mvp[2] * px + mvp[6] * py + mvp[10] * pz + mvp[14];
-        const sx = ((cx * invW) * 0.5 + 0.5) * cols;
-        const sy = ((cy * invW) * 0.5 + 0.5) * rows;
+        const sx = ((cx * invW) * 0.5 + 0.5) * sw;
+        const sy = ((cy * invW) * 0.5 + 0.5) * sh;
         vBufSx[vi] = sx;
         vBufSy[vi] = sy;
         vBufSz[vi] = cz * invW;
+        vBufIw[vi] = invW;
         if (sx < meshMinX) meshMinX = sx; if (sx > meshMaxX) meshMaxX = sx;
         if (sy < meshMinY) meshMinY = sy; if (sy > meshMaxY) meshMaxY = sy;
 
@@ -1891,16 +1964,19 @@ window.PokeGameUI = (function() {
         const nwx = m[0] * nm.x + m[4] * nm.y + m[8] * nm.z;
         const nwy = m[1] * nm.x + m[5] * nm.y + m[9] * nm.z;
         const nwz = m[2] * nm.x + m[6] * nm.y + m[10] * nm.z;
-        const nl = Math.hypot(nwx, nwy, nwz) || 1.0;
+        const nl = Math.sqrt(nwx * nwx + nwy * nwy + nwz * nwz) || 1.0;
         vBufNx[vi] = nwx / nl;
         vBufNy[vi] = nwy / nl;
         vBufNz[vi] = nwz / nl;
       }
 
       // Frustum culling da malha inteira
-      if (!anyVisible || meshMaxX < 0 || meshMinX >= cols || meshMaxY < 0 || meshMinY >= rows) continue;
+      if (!anyVisible || meshMaxX < 0 || meshMinX >= sw || meshMaxY < 0 || meshMinY >= sh) continue;
 
       const meshTextures = cmd.mesh.textures || null;
+      const cmdId = cmd.id;
+      const tintLaser = Boolean(cmd.tintRedLaser);
+      const tintEvo = Boolean(cmd.tintEvolutionMorph);
 
       for (let t = 0; t < indices.length; t += 3) {
         const i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
@@ -1914,69 +1990,105 @@ window.PokeGameUI = (function() {
         // Backface Culling rápido para malhas 3D fechadas (.glb)
         if (isClosedGlb && (vBufNz[i0] + vBufNz[i1] + vBufNz[i2]) < -0.85) continue;
 
-        const minX = Math.max(0, Math.floor(Math.min(sx0, sx1, sx2)));
-        const maxX = Math.min(cols - 1, Math.ceil(Math.max(sx0, sx1, sx2)));
-        const minY = Math.max(0, Math.floor(Math.min(sy0, sy1, sy2)));
-        const maxY = Math.min(rows - 1, Math.ceil(Math.max(sy0, sy1, sy2)));
+        // BBox dos CENTROS de amostra (px + 0.5): triângulos menores que 1 amostra e sem centro dentro
+        // (comuns em zoom-out com malhas de 20k triângulos) saem aqui, sem prólogo nenhum.
+        const minX = Math.max(0, Math.ceil(Math.min(sx0, sx1, sx2) - 0.5));
+        const maxX = Math.min(sw - 1, Math.floor(Math.max(sx0, sx1, sx2) - 0.5));
+        const minY = Math.max(0, Math.ceil(Math.min(sy0, sy1, sy2) - 0.5));
+        const maxY = Math.min(sh - 1, Math.floor(Math.max(sy0, sy1, sy2) - 0.5));
         if (minX > maxX || minY > maxY) continue;
 
         const invArea = 1.0 / area;
+        // w0 = (pfx - sx1) * a0 - (pfy - sy1) * b0 ; w1 = (pfx - sx2) * a1 - (pfy - sy2) * b1
+        const a0 = (sy2 - sy1) * invArea, b0 = (sx2 - sx1) * invArea;
+        const a1 = (sy0 - sy2) * invArea, b1 = (sx0 - sx2) * invArea;
         const sz0 = vBufSz[i0], sz1 = vBufSz[i1], sz2 = vBufSz[i2];
-        const v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
-        const activeTex = (meshTextures && v0.texIdx !== undefined && v0.texIdx >= 0) ? meshTextures[v0.texIdx] : null;
+        // Atributos pesados (cor/normal/UV) só são lidos no primeiro pixel realmente coberto
+        let attrReady = false;
+        let nx0 = 0, nx1 = 0, nx2 = 0, ny0 = 0, ny1 = 0, ny2 = 0, nz0 = 0, nz1 = 0, nz2 = 0;
+        let c0x = 0, c0y = 0, c0z = 0, c1x = 0, c1y = 0, c1z = 0, c2x = 0, c2y = 0, c2z = 0;
+        let activeTex = null;
+        let iw0 = 0, iw1 = 0, iw2 = 0, u0 = 0, u1 = 0, u2 = 0, tv0 = 0, tv1 = 0, tv2 = 0;
 
         for (let py = minY; py <= maxY; ++py) {
           const pfy = py + 0.5;
+          const rowT0 = (pfy - sy1) * b0, rowT1 = (pfy - sy2) * b1;
+          const rowIdx = py * sw;
           for (let px = minX; px <= maxX; ++px) {
             const pfx = px + 0.5;
-            const w0 = ((pfx - sx1) * (sy2 - sy1) - (pfy - sy1) * (sx2 - sx1)) * invArea;
-            const w1 = ((pfx - sx2) * (sy0 - sy2) - (pfy - sy2) * (sx0 - sx2)) * invArea;
+            const w0 = (pfx - sx1) * a0 - rowT0;
+            const w1 = (pfx - sx2) * a1 - rowT1;
             const w2 = 1.0 - w0 - w1;
             if (w0 < 0 || w1 < 0 || w2 < 0) continue;
 
             const z = w0 * sz0 + w1 * sz1 + w2 * sz2;
-            const idx = py * cols + px;
+            const idx = rowIdx + px;
             if (z >= gbZ[idx]) continue;
 
-            let nx = vBufNx[i0] * w0 + vBufNx[i1] * w1 + vBufNx[i2] * w2;
-            let ny = vBufNy[i0] * w0 + vBufNy[i1] * w1 + vBufNy[i2] * w2;
-            const nz = vBufNz[i0] * w0 + vBufNz[i1] * w1 + vBufNz[i2] * w2;
-
-            let texR = v0.col.x * w0 + v1.col.x * w1 + v2.col.x * w2;
-            let texG = v0.col.y * w0 + v1.col.y * w1 + v2.col.y * w2;
-            let texB = v0.col.z * w0 + v1.col.z * w1 + v2.col.z * w2;
-
-            if (activeTex && E.sampleGlbTexture) {
-              const tu = v0.u * w0 + v1.u * w1 + v2.u * w2;
-              const tv = v0.v * w0 + v1.v * w1 + v2.v * w2;
-              const s = E.sampleGlbTexture(activeTex, tu, tv);
-              if (s) {
-                // Alpha Cutout: descarta pixels transparentes de decals de íris/pupila/chamas
-                // para não cobrir o branco do olho com retângulos pretos!
-                if (s.a < 0.35) continue;
-                texR = s.r;
-                texG = s.g;
-                texB = s.b;
-                nx += s.dU * 2.35;
-                ny += s.dV * 2.35;
+            if (!attrReady) {
+              attrReady = true;
+              nx0 = vBufNx[i0]; nx1 = vBufNx[i1]; nx2 = vBufNx[i2];
+              ny0 = vBufNy[i0]; ny1 = vBufNy[i1]; ny2 = vBufNy[i2];
+              nz0 = vBufNz[i0]; nz1 = vBufNz[i1]; nz2 = vBufNz[i2];
+              const v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
+              const c0 = v0.col, c1 = v1.col, c2 = v2.col;
+              c0x = c0.x; c0y = c0.y; c0z = c0.z;
+              c1x = c1.x; c1y = c1.y; c1z = c1.z;
+              c2x = c2.x; c2y = c2.y; c2z = c2.z;
+              activeTex = (meshTextures && v0.texIdx !== undefined && v0.texIdx >= 0) ? meshTextures[v0.texIdx] : null;
+              if (activeTex) {
+                // Interpolação perspectiva-correta de UV (1/w por vértice): sem "nadar" de textura em zoom-in
+                iw0 = vBufIw[i0]; iw1 = vBufIw[i1]; iw2 = vBufIw[i2];
+                u0 = v0.u * iw0; u1 = v1.u * iw1; u2 = v2.u * iw2;
+                tv0 = v0.v * iw0; tv1 = v1.v * iw1; tv2 = v2.v * iw2;
               }
             }
 
-            gbZ[idx] = z;
-            gbId[idx] = cmd.id;
-            gbNx[idx] = nx; gbNy[idx] = ny; gbNz[idx] = nz;
+            let nx = nx0 * w0 + nx1 * w1 + nx2 * w2;
+            let ny = ny0 * w0 + ny1 * w1 + ny2 * w2;
+            const nz = nz0 * w0 + nz1 * w1 + nz2 * w2;
 
-            const ndotl = Math.max(0, nx * lightDir.x + ny * lightDir.y + nz * lightDir.z);
+            let texR = c0x * w0 + c1x * w1 + c2x * w2;
+            let texG = c0y * w0 + c1y * w1 + c2y * w2;
+            let texB = c0z * w0 + c1z * w1 + c2z * w2;
+
+            if (activeTex) {
+              const q0 = w0 * iw0, q1 = w1 * iw1, q2 = w2 * iw2;
+              const invQ = 1.0 / (q0 + q1 + q2);
+              E.sampleGlbTextureInto(
+                activeTex,
+                (u0 * w0 + u1 * w1 + u2 * w2) * invQ,
+                (tv0 * w0 + tv1 * w1 + tv2 * w2) * invQ,
+                texOut
+              );
+              // Alpha Cutout: descarta pixels transparentes de decals de íris/pupila/chamas
+              // para não cobrir o branco do olho com retângulos pretos!
+              if (texOut[3] < 0.35) continue;
+              texR = texOut[0];
+              texG = texOut[1];
+              texB = texOut[2];
+              nx += texOut[4] * 2.35;
+              ny += texOut[5] * 2.35;
+            }
+
+            gbZ[idx] = z;
+            gbId[idx] = cmdId;
+            gbNx[idx] = nx; gbNy[idx] = ny;
+
+            const ndotl = Math.max(0, nx * ldx + ny * ldy + nz * ldz);
             const hemi = 0.34 + 0.14 * (0.5 + 0.5 * ny);
-            const rim = Math.pow(1.0 - Math.min(1, Math.abs(nz)), 2.2) * 0.38;
-            const spec = Math.pow(Math.max(0, ndotl), 10.0) * 0.14;
+            // pow() é lento no laço por-amostra: t^2.2 ~ t^2 * t^0.25 e ndotl^10 por quadrados sucessivos
+            const rimT = 1.0 - Math.min(1, Math.abs(nz));
+            const rim = rimT * rimT * Math.sqrt(Math.sqrt(rimT)) * 0.38;
+            const d2 = ndotl * ndotl, d4 = d2 * d2, d8 = d4 * d4;
+            const spec = d8 * d2 * 0.14;
             gbLight[idx] = Math.min(1.42, hemi + 0.72 * ndotl + rim + spec);
 
-            if (cmd.tintRedLaser) {
+            if (tintLaser) {
               gbColR[idx] = 1.0;
               gbColG[idx] = 0.22;
               gbColB[idx] = 0.28;
-            } else if (cmd.tintEvolutionMorph) {
+            } else if (tintEvo) {
               gbColR[idx] = 0.75;
               gbColG[idx] = 0.98;
               gbColB[idx] = 1.0;
@@ -1990,30 +2102,6 @@ window.PokeGameUI = (function() {
         }
       }
     }
-
-    // Sobel 3D Duplo (Profundidade Z + Normais 3D + Relevo UV) sobre as Entidades 3D
-    for (let r = 1; r < rows - 1; ++r) {
-      for (let c = 1; c < cols - 1; ++c) {
-        const i = r * cols + c;
-        if (gbId[i] === 0) continue;
-
-        const idDiff = (gbId[i - 1] !== gbId[i]) || (gbId[i + 1] !== gbId[i]) ||
-                       (gbId[i - cols] !== gbId[i]) || (gbId[i + cols] !== gbId[i]);
-        const nxDiff = Math.abs(gbNx[i + 1] - gbNx[i - 1]) + Math.abs(gbNy[i + cols] - gbNy[i - cols]);
-        const zDiff = (!idDiff) ? (Math.abs(gbZ[i + 1] - gbZ[i - 1]) + Math.abs(gbZ[i + cols] - gbZ[i - cols])) : 0;
-
-        if (idDiff || nxDiff > 0.36 || zDiff > 0.016) {
-          edgeMag[i] = 1.0;
-          const gx = (gbNx[i + 1] - gbNx[i - 1]) * 1.4 + (gbId[i + 1] - gbId[i - 1]) + (gbZ[i + 1] - gbZ[i - 1]) * 12.0;
-          const gy = (gbNy[i + cols] - gbNy[i - cols]) * 1.4 + (gbId[i + cols] - gbId[i - cols]) + (gbZ[i + cols] - gbZ[i - cols]) * 12.0;
-          const deg = ((Math.atan2(gy, gx) * 180 / Math.PI) + 180) % 180;
-          if (deg < 22.5 || deg >= 157.5) edgeDir[i] = 1;
-          else if (deg >= 67.5 && deg < 112.5) edgeDir[i] = 2;
-          else if (deg >= 22.5 && deg < 67.5) edgeDir[i] = 3;
-          else edgeDir[i] = 4;
-        }
-      }
-    }
   }
 
   // ============================================================================
@@ -2022,11 +2110,17 @@ window.PokeGameUI = (function() {
   // + Glifos ASCII com Anti-Aliasing Sub-Pixel de Altíssima Nitidez!
   // ============================================================================
   function renderAsciiCanvas(timeSec) {
-    const shadeRamp = " .',:;!~+-=*oO08#%W@";
-    const shadeLen = shadeRamp.length;
-    const dirChars = [" ", "|", "-", "/", "\\"];
     const useFastBlit = Boolean(framePixels32 && frameImageData && glyphAtlas);
     const canvasW = canvas.width;
+    const sxN = ssx, syN = ssy, S = sxN * syN;
+    const structureOn = S > 1 && shapeCache !== null;
+    const invS = 1 / S;
+    const ssAvg = (sxN + syN) * 0.5;
+    // Limiares de crease 3D em escala de amostra (vizinhos ficam mais próximos quanto maior o ss)
+    const tN = 0.36 / ssAvg, tZ = 0.016 / ssAvg;
+    const centerK = (syN >> 1) * sxN + (sxN >> 1);
+    const shadeLast = SHADE_IDX.length - 1;
+    const scrR = SCR_R, scrG = SCR_G, scrB = SCR_B, scrInk = SCR_INK;
 
     if (!useFastBlit) {
       ctx.fillStyle = "#081024";
@@ -2040,105 +2134,118 @@ window.PokeGameUI = (function() {
 
     for (let r = 0; r < rows; ++r) {
       const py = r * cellH;
+      const y0 = r * syN;
       for (let c = 0; c < cols; ++c) {
-        const i = r * cols + c;
         const px = c * cellW;
-        const id = gbId[i];
+        const x0 = c * sxN;
 
-        let fgR, fgG, fgB, bgR, bgG, bgB, ch;
-
-        if (id > 0) {
-          // CÉLULA DE ENTIDADE 3D (Pokémon, Avatar, Pokébola, Anel de Raio 3.5m, Ginásio, PokéStop)
-          const lit = gbLight[i];
-          let cr = gbColR[i] * lit;
-          let cg = gbColG[i] * lit;
-          let cb = gbColB[i] * lit;
-          const maxC = Math.max(cr, cg, cb, 1.0);
-          if (maxC > 1.0) {
-            const spec = (maxC - 1.0) * 0.16;
-            cr = Math.min(1.0, cr / maxC + spec);
-            cg = Math.min(1.0, cg / maxC + spec);
-            cb = Math.min(1.0, cb / maxC + spec);
-          }
-
-          const isOuterSilhouette =
-            (c > 0 && gbId[i - 1] === 0) || (c < cols - 1 && gbId[i + 1] === 0) ||
-            (r > 0 && gbId[i - cols] === 0) || (r < rows - 1 && gbId[i + cols] === 0);
-
-          if (id === 7 || id === 2) {
-            bgR = (cr * 115) | 0;
-            bgG = (cg * 155) | 0;
-            bgB = (cb * 175) | 0;
-            fgR = Math.min(255, (cr * 255 + 75) | 0);
-            fgG = Math.min(255, (cg * 255 + 75) | 0);
-            fgB = Math.min(255, (cb * 255 + 75) | 0);
-            ch = ((c + r) & 1) === 0 ? "o" : "+";
-          } else if (isOuterSilhouette) {
-            // Contorno de silhueta 3D de 1 célula com contraste escuro profundo + traço luminoso
-            bgR = (cr * 48) | 0;
-            bgG = (cg * 48) | 0;
-            bgB = (cb * 62) | 0;
-            fgR = Math.min(255, (cr * 255 + 108) | 0);
-            fgG = Math.min(255, (cg * 255 + 108) | 0);
-            fgB = Math.min(255, (cb * 255 + 115) | 0);
-            ch = edgeDir[i] > 0 ? dirChars[edgeDir[i]] : "#";
-          } else {
-            // Sombreamento 3D anatômico de 20 níveis + vincos internos Sobel 3D (olhos, boca, garras, listras)
-            bgR = (cr * 212) | 0;
-            bgG = (cg * 212) | 0;
-            bgB = (cb * 212) | 0;
-
-            if (edgeMag[i] > 0.42 && edgeDir[i] > 0) {
-              // Vinco anatômico interno com alto contraste
-              bgR = (cr * 165) | 0;
-              bgG = (cg * 165) | 0;
-              bgB = (cb * 172) | 0;
-              fgR = Math.min(255, (cr * 255 + 96) | 0);
-              fgG = Math.min(255, (cg * 255 + 96) | 0);
-              fgB = Math.min(255, (cb * 255 + 96) | 0);
-              ch = dirChars[edgeDir[i]];
+        // 1) Resolve as S amostras da célula: cor final + "tinta" (o que o glifo deve desenhar)
+        let entCount = 0, lo = 9, hi = -9, centerCt = 0;
+        let sumR = 0, sumG = 0, sumB = 0, edgeHit = false;
+        let k = 0;
+        for (let sy = 0; sy < syN; ++sy) {
+          const y = y0 + sy;
+          for (let sx = 0; sx < sxN; ++sx, ++k) {
+            const x = x0 + sx;
+            const idx = y * sw + x;
+            const id = gbId[idx];
+            let cr, cg, cb, ink;
+            if (id > 0) {
+              const lit = gbLight[idx];
+              cr = gbColR[idx] * lit;
+              cg = gbColG[idx] * lit;
+              cb = gbColB[idx] * lit;
+              const maxC = Math.max(cr, cg, cb, 1.0);
+              if (maxC > 1.0) {
+                const spec = (maxC - 1.0) * 0.16;
+                cr = Math.min(1.0, cr / maxC + spec);
+                cg = Math.min(1.0, cg / maxC + spec);
+                cb = Math.min(1.0, cb / maxC + spec);
+              }
+              // Silhueta (vizinho de outra entidade/fundo) e vincos 3D (normal/profundidade) em escala de amostra
+              const iL = x > 0 ? idx - 1 : idx, iR = x + 1 < sw ? idx + 1 : idx;
+              const iU = y > 0 ? idx - sw : idx, iD = y + 1 < sh ? idx + sw : idx;
+              if (gbId[iL] !== id || gbId[iR] !== id || gbId[iU] !== id || gbId[iD] !== id) {
+                ink = 1.0;
+                edgeHit = true;
+              } else {
+                const dn = Math.abs(gbNx[iR] - gbNx[iL]) + Math.abs(gbNy[iD] - gbNy[iU]);
+                const dz = Math.abs(gbZ[iR] - gbZ[iL]) + Math.abs(gbZ[iD] - gbZ[iU]);
+                ink = (dn > tN || dz > tZ) ? 0.9 : (0.299 * cr + 0.587 * cg + 0.114 * cb) * 0.72;
+              }
+              ++entCount;
             } else {
-              fgR = Math.min(255, (cr * 255 + 64) | 0);
-              fgG = Math.min(255, (cg * 255 + 64) | 0);
-              fgB = Math.min(255, (cb * 255 + 64) | 0);
-              const luma = Math.min(1, 0.299 * cr + 0.587 * cg + 0.114 * cb);
-              ch = shadeRamp[Math.min(shadeLen - 1, Math.max(1, (luma * (shadeLen - 1)) | 0))];
+              cr = camR[idx]; cg = camG[idx]; cb = camB[idx];
+              ink = 0.299 * cr + 0.587 * cg + 0.114 * cb;
+              if (k === centerK) centerCt = camCellType[idx];
             }
-          }
-        } else {
-          // CÉLULA DO AMBIENTE 3D EM ASCII (Mapa GPS Pokémon GO com Plantas Baixas Planas)
-          const cr = camR[i], cg = camG[i], cb = camB[i];
-          const ct = camCellType[i];
-          bgR = (cr * 185) | 0;
-          bgG = (cg * 185) | 0;
-          bgB = (cb * 195) | 0;
-
-          fgR = Math.min(255, (cr * 255 + 44) | 0);
-          fgG = Math.min(255, (cg * 255 + 48) | 0);
-          fgB = Math.min(255, (cb * 255 + 58) | 0);
-
-          if (ct === 2) {
-            ch = "=";
-          } else if (ct === 3) {
-            ch = "#";
-          } else if (ct === 5) {
-            // Parede perimetral da planta baixa plana do prédio no chão
-            ch = "+";
-          } else if (ct === 4) {
-            // Interior da planta baixa plana do prédio no chão
-            ch = ((r & 1) === 0 && (c & 1) === 0) ? ":" : ".";
-          } else if (ct === 1) {
-            ch = "·";
-          } else if (edgeMag[i] > 0.20 && edgeDir[i] > 0) {
-            ch = dirChars[edgeDir[i]];
-          } else {
-            ch = ((r + c) & 1) === 0 ? "." : ",";
+            scrR[k] = cr; scrG[k] = cg; scrB[k] = cb; scrInk[k] = ink;
+            sumR += cr; sumG += cg; sumB += cb;
+            if (ink < lo) lo = ink;
+            if (ink > hi) hi = ink;
           }
         }
 
+        let gi, fgR, fgG, fgB, bgR, bgG, bgB;
+        const contrast = hi - lo;
+
+        if (structureOn && contrast >= CONTRAST_MIN) {
+          // 2a) Casamento de forma: o padrão de tinta quantizado (4 níveis/amostra) escolhe o glifo
+          //     cujo desenho tem a mesma estrutura (|, /, \, -, _, cantos, pontos...). Resultado em cache.
+          const mid = (lo + hi) * 0.5;
+          const invC = 3.0 / contrast;
+          let hR = 0, hG = 0, hB = 0, hN = 0, lR = 0, lG = 0, lB = 0, lN = 0, key = 0;
+          for (let q = 0; q < S; ++q) {
+            const ink = scrInk[q];
+            if (ink >= mid) { hR += scrR[q]; hG += scrG[q]; hB += scrB[q]; ++hN; }
+            else { lR += scrR[q]; lG += scrG[q]; lB += scrB[q]; ++lN; }
+            key |= (((ink - lo) * invC + 0.5) | 0) << (q * 2);
+          }
+          gi = shapeCache[key];
+          if (gi === 255) { gi = matchGlyphKey(key); shapeCache[key] = gi; }
+          const ih = 1.0 / hN, il = lN > 0 ? 1.0 / lN : 0;
+          fgR = Math.min(255, ((hR * ih) * 255 + 56) | 0);
+          fgG = Math.min(255, ((hG * ih) * 255 + 56) | 0);
+          fgB = Math.min(255, ((hB * ih) * 255 + 62) | 0);
+          bgR = ((lN > 0 ? lR * il : hR * ih) * 204) | 0;
+          bgG = ((lN > 0 ? lG * il : hG * ih) * 204) | 0;
+          bgB = ((lN > 0 ? lB * il : hB * ih) * 212) | 0;
+        } else {
+          // 2b) Região plana: densidade por luminância (entidade) ou glifo do tipo de piso (ground)
+          const mr = sumR * invS, mg = sumG * invS, mb = sumB * invS;
+          if (entCount * 2 >= S) {
+            if (!structureOn && edgeHit) {
+              // Nível legado (1 amostra/célula): contorno de silhueta de 1 célula
+              bgR = (mr * 48) | 0; bgG = (mg * 48) | 0; bgB = (mb * 62) | 0;
+              fgR = Math.min(255, (mr * 255 + 108) | 0);
+              fgG = Math.min(255, (mg * 255 + 108) | 0);
+              fgB = Math.min(255, (mb * 255 + 115) | 0);
+              gi = GI_HASH;
+            } else {
+              bgR = (mr * 212) | 0; bgG = (mg * 212) | 0; bgB = (mb * 212) | 0;
+              fgR = Math.min(255, (mr * 255 + 64) | 0);
+              fgG = Math.min(255, (mg * 255 + 64) | 0);
+              fgB = Math.min(255, (mb * 255 + 64) | 0);
+              const luma = Math.min(1, 0.299 * mr + 0.587 * mg + 0.114 * mb);
+              gi = SHADE_IDX[Math.min(shadeLast, Math.max(1, (luma * shadeLast) | 0))];
+            }
+          } else {
+            bgR = (mr * 185) | 0; bgG = (mg * 185) | 0; bgB = (mb * 195) | 0;
+            fgR = Math.min(255, (mr * 255 + 44) | 0);
+            fgG = Math.min(255, (mg * 255 + 48) | 0);
+            fgB = Math.min(255, (mb * 255 + 58) | 0);
+            if (centerCt === 2) gi = GI_EQ;
+            else if (centerCt === 3) gi = GI_HASH;
+            else if (centerCt === 5) gi = GI_PLUS;
+            else if (centerCt === 4) gi = ((r & 1) === 0 && (c & 1) === 0) ? GI_COLON : GI_DOT;
+            else if (centerCt === 1) gi = GI_MIDDOT;
+            else gi = ((r + c) & 1) === 0 ? GI_DOT : GI_COMMA;
+          }
+        }
+
+        // 3) Blit do glifo (atlas anti-aliased) com cores fg/bg da célula
         if (useFastBlit) {
-          const ci = CHAR_TO_IDX.get(ch) || 0;
-          const mask = glyphAtlas[ci];
+          const mask = glyphAtlas[gi];
           const bgPack = 0xFF000000 | (bgB << 16) | (bgG << 8) | bgR;
           const fgPack = 0xFF000000 | (fgB << 16) | (fgG << 8) | fgR;
           const dR = fgR - bgR, dG = fgG - bgG, dB = fgB - bgB;
@@ -2163,7 +2270,7 @@ window.PokeGameUI = (function() {
           ctx.fillStyle = fastRgb(bgR, bgG, bgB);
           ctx.fillRect(px, py, cellW, cellH);
           ctx.fillStyle = fastRgb(fgR, fgG, fgB);
-          ctx.fillText(ch, px, py);
+          ctx.fillText(GLYPH_CHARS[gi], px, py);
         }
       }
     }
@@ -4532,9 +4639,30 @@ window.PokeGameUI = (function() {
       currentFps = fpsFrames;
       fpsFrames = 0;
       fpsLastTime = now;
-      if (currentFps < 26 && qualityTier > 1) {
-        qualityTier--;
-        resizeViewport();
+      if (governorEnabled && now > GOVERNOR_GRACE_MS) {
+        if (currentFps < 26) {
+          // Primeiro reduz a subamostragem (custo ~ssx*ssy); só depois aumenta o tamanho da célula.
+          goodFpsSeconds = 0;
+          if (ssLevel > 0) {
+            // Se caiu logo após um upgrade, o nível acima não se sustenta neste aparelho: trava o teto.
+            if (now - ssUpgradedAt < 12000) ssCeiling = Math.min(ssCeiling, ssLevel - 1);
+            ssLevel--;
+            resizeViewport();
+          } else if (qualityTier > 1) {
+            qualityTier--;
+            resizeViewport();
+          }
+        } else if (currentFps >= 56 && ssLevel < ssCeiling) {
+          // Recupera detalhe quando há folga sustentada (histerese de 5 s)
+          if (++goodFpsSeconds >= 5) {
+            goodFpsSeconds = 0;
+            ssLevel++;
+            ssUpgradedAt = now;
+            resizeViewport();
+          }
+        } else {
+          goodFpsSeconds = 0;
+        }
       }
     }
 
@@ -4552,8 +4680,13 @@ window.PokeGameUI = (function() {
     updatePokeballPhysics(dt);
 
     // 100% PURE 3D G-BUFFER ASCII RENDERING PIPELINE EM TODAS AS CENAS!
+    const tR0 = performance.now();
     rasterize3DScene(timeSec);
+    const tR1 = performance.now();
     renderAsciiCanvas(timeSec);
+    const tR2 = performance.now();
+    perfMs.sceneTotal += (tR1 - tR0 - perfMs.sceneTotal) * 0.1;
+    perfMs.resolve += (tR2 - tR1 - perfMs.resolve) * 0.1;
 
     requestAnimationFrame(mainLoop);
   }
@@ -4618,6 +4751,9 @@ window.PokeGameUI = (function() {
     cycleAsciiDetailTier,
     toggleAsciiUiMode,
     adjustZoom,
+    getRenderInfo: () => ({ cols, rows, cellW, cellH, ssx, ssy, ssLevel, qualityTier, fps: currentFps, perfMs: { ...perfMs } }),
+    // Fixa o nível de subamostragem (0..2) e desliga o governador automático; útil para testes/benchmarks.
+    setSubsampling: (level) => { governorEnabled = false; ssLevel = Math.max(0, Math.min(SS_LEVELS.length - 1, level | 0)); resizeViewport(); },
     startRealGpsTracking,
     toggleNavModeOrResyncGps,
     maybeShowScreenGuide,

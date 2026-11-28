@@ -426,8 +426,11 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     return out;
   }
 
+  // Resolução das texturas GLB: 256px no desktop (zoom-in nítido), 160px no mobile (memória/CPU).
+  const GLB_TEX_SIZE = /Android|iPhone|iPad|iPod|Mobile/i.test((typeof navigator !== "undefined" && navigator.userAgent) || "") ? 160 : 256;
+
   async function decodeGlbImageToTextureBuffer(pngBytes, mimeType, imgName = "") {
-    const texW = 128, texH = 128;
+    const texW = GLB_TEX_SIZE, texH = GLB_TEX_SIZE;
     const isPngGrayscale = pngBytes.length > 26 && pngBytes[0] === 0x89 && pngBytes[1] === 0x50 && (pngBytes[25] === 0 || pngBytes[25] === 4);
     const blob = new Blob([pngBytes], { type: mimeType || "image/png" });
     const c = document.createElement("canvas");
@@ -565,6 +568,26 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
       dU,
       dV
     };
+  }
+
+  // Variante sem alocação para o laço por-amostra do rasterizador (out = [r,g,b,a,dU,dV]).
+  function sampleGlbTextureInto(tex, u, v, out) {
+    const w = tex.width, h = tex.height;
+    let tx = ((u - Math.floor(u)) * w) | 0;
+    let ty = ((v - Math.floor(v)) * h) | 0;
+    if (tx >= w) tx = w - 1;
+    if (ty >= h) ty = h - 1;
+    const row = ty * w;
+    const p = (row + tx) << 2;
+    const rgba = tex.rgba, luma = tex.luma;
+    const txL = tx > 0 ? tx - 1 : tx, txR = tx + 1 < w ? tx + 1 : tx;
+    const tyU = ty > 0 ? ty - 1 : ty, tyD = ty + 1 < h ? ty + 1 : ty;
+    out[0] = rgba[p] * (1 / 255);
+    out[1] = rgba[p + 1] * (1 / 255);
+    out[2] = rgba[p + 2] * (1 / 255);
+    out[3] = rgba[p + 3] * (1 / 255);
+    out[4] = luma[row + txR] - luma[row + txL];
+    out[5] = luma[tyD * w + tx] - luma[tyU * w + tx];
   }
 
   async function parseAndBuildReal3DGlbMesh(arrayBuffer, isShiny) {
@@ -1604,6 +1627,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     computeVisualScale,
     getPokemonMesh,
     sampleGlbTexture,
+    sampleGlbTextureInto,
     buildPokeballMesh,
     buildAnchorRingMesh,
     buildTrainerAvatarMesh,
