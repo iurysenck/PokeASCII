@@ -204,7 +204,10 @@ window.PokeGameUI = (function() {
   // Atlas Bitmap Anti-Aliased de Glifos ASCII + ImageData Uint32Array (30x mais rápido que fillText no Mobile!)
   // Conjunto de glifos usado tanto para sombreamento (rampa de densidade) quanto para o casamento
   // de forma por célula (bordas | / \ - _, cantos ( ) [ ], pontos . ' ` etc.).
-  const GLYPH_CHARS = " .'`,:;!|/\\-_=+~^\"<>()[]*oO0#%@WM8&X$L7TYV·";
+  const GLYPH_CHARS = " .'`,:;!|/\\-_=+~^\"()*oO0#%@W8·";
+  // Só glifos de TRAÇO participam do casamento de forma. Letras/colchetes/cifrão casavam por cobertura e
+  // viravam ruído ("L T 7 $") em linhas diagonais; W, 8 e 0 ficam só na rampa de densidade.
+  const MATCH_CHARS = ".'`,:;!|/\\-_=+~^\"#@·";
   const CHAR_TO_IDX = new Map();
   for (let i = 0; i < GLYPH_CHARS.length; ++i) CHAR_TO_IDX.set(GLYPH_CHARS[i], i);
   const SHADE_RAMP = " .',:;!~+-=*oO08#%W@";
@@ -219,10 +222,17 @@ window.PokeGameUI = (function() {
   let governorEnabled = true;       // governador de FPS automático (desligado por setSubsampling)
   const GOVERNOR_GRACE_MS = 6000;   // ignora quedas de FPS durante o carregamento inicial (GLB/texturas)
   let ssCeiling = SS_LEVELS.length - 1, goodFpsSeconds = 0, ssUpgradedAt = -1e9;
-  const CONTRAST_MIN = 0.16;        // contraste mínimo de "tinta" na célula para usar casamento de forma
+  // Contraste mínimo de "tinta" na célula para usar casamento de forma, por tipo de célula:
+  const CONTRAST_GROUND = 0.05;     // chão: ruas/meio-fio têm pouco contraste (e a névoa reduz mais ainda)
+  const CONTRAST_EDGE = 0.16;       // entidade com silhueta/vinco 3D dentro da célula
+  const CONTRAST_TEXTURE = 0.34;    // interior liso de entidade: só vira forma com detalhe forte (olhos, listras)
+                                    // (abaixo disso usa densidade/sombreado, que lê melhor que "ruído de glifos")
   const MAX_SS_SAMPLES = 6;
   const SCR_R = new Float32Array(MAX_SS_SAMPLES), SCR_G = new Float32Array(MAX_SS_SAMPLES);
   const SCR_B = new Float32Array(MAX_SS_SAMPLES), SCR_INK = new Float32Array(MAX_SS_SAMPLES);
+  const LEGACY_DIR_IDX = [0, CHAR_TO_IDX.get("|"), CHAR_TO_IDX.get("-"), CHAR_TO_IDX.get("/"), CHAR_TO_IDX.get("\\")];
+  const GI_O = CHAR_TO_IDX.get("o");
+  let legacyLuma = null, legacyMag = null, legacyDir = null; // só no nível 1x1 (bordas Sobel por célula)
   let glyphShape = null;            // Float32Array(G * S): cobertura normalizada de cada glifo por sub-bloco
   let glyphUsable = null;           // Uint8Array(G): glifo tem contraste interno suficiente
   let shapeCache = null;            // Uint8Array(4^S): chave de padrão quantizado -> índice do glifo (255 = vazio)
@@ -267,6 +277,7 @@ window.PokeGameUI = (function() {
     shapeCache = new Uint8Array(1 << (2 * S)).fill(255);
     const tmp = new Float32Array(S);
     for (let gi = 1; gi < G; ++gi) {
+      if (MATCH_CHARS.indexOf(GLYPH_CHARS[gi]) < 0) continue;
       const mask = glyphAtlas[gi];
       let mn = 1e9, mx = -1e9, k = 0;
       for (let sy = 0; sy < ssy; ++sy) {
@@ -329,6 +340,57 @@ window.PokeGameUI = (function() {
     gbColG = new Float32Array(n);
     gbColB = new Float32Array(n);
     gbLight = new Float32Array(n);
+    if (ssx * ssy === 1) {
+      legacyLuma = new Float32Array(n);
+      legacyMag = new Float32Array(n);
+      legacyDir = new Uint8Array(n);
+    } else {
+      legacyLuma = legacyMag = legacyDir = null;
+    }
+  }
+
+  // Nível 1x1 (aparelhos lentos): bordas por célula, como no renderer original — Sobel de luminância
+  // no fundo e Sobel 3D (id/normal/profundidade) nas entidades, com direção -> | - / \.
+  function computeLegacyEdges() {
+    const n = cols * rows;
+    for (let i = 0; i < n; ++i) legacyLuma[i] = 0.299 * camR[i] + 0.587 * camG[i] + 0.114 * camB[i];
+    legacyMag.fill(0);
+    legacyDir.fill(0);
+    const L = legacyLuma;
+    for (let r = 1; r < rows - 1; ++r) {
+      for (let c = 1; c < cols - 1; ++c) {
+        const i = r * cols + c;
+        const gx = -L[i - cols - 1] + L[i - cols + 1] - 2 * L[i - 1] + 2 * L[i + 1] - L[i + cols - 1] + L[i + cols + 1];
+        const gy = -L[i - cols - 1] - 2 * L[i - cols] - L[i - cols + 1] + L[i + cols - 1] + 2 * L[i + cols] + L[i + cols + 1];
+        const mag = Math.hypot(gx, gy);
+        legacyMag[i] = mag;
+        if (mag > 0.15) legacyDir[i] = dirClass(gx, gy);
+      }
+    }
+    for (let r = 1; r < rows - 1; ++r) {
+      for (let c = 1; c < cols - 1; ++c) {
+        const i = r * cols + c;
+        if (gbId[i] === 0) continue;
+        const idDiff = (gbId[i - 1] !== gbId[i]) || (gbId[i + 1] !== gbId[i]) ||
+                       (gbId[i - cols] !== gbId[i]) || (gbId[i + cols] !== gbId[i]);
+        const nxDiff = Math.abs(gbNx[i + 1] - gbNx[i - 1]) + Math.abs(gbNy[i + cols] - gbNy[i - cols]);
+        const zDiff = (!idDiff) ? (Math.abs(gbZ[i + 1] - gbZ[i - 1]) + Math.abs(gbZ[i + cols] - gbZ[i - cols])) : 0;
+        if (idDiff || nxDiff > 0.36 || zDiff > 0.016) {
+          legacyMag[i] = 1.0;
+          const gx = (gbNx[i + 1] - gbNx[i - 1]) * 1.4 + (gbId[i + 1] - gbId[i - 1]) + (gbZ[i + 1] - gbZ[i - 1]) * 12.0;
+          const gy = (gbNy[i + cols] - gbNy[i - cols]) * 1.4 + (gbId[i + cols] - gbId[i - cols]) + (gbZ[i + cols] - gbZ[i - cols]) * 12.0;
+          legacyDir[i] = dirClass(gx, gy);
+        }
+      }
+    }
+  }
+
+  function dirClass(gx, gy) {
+    const deg = ((Math.atan2(gy, gx) * 180 / Math.PI) + 180) % 180;
+    if (deg < 22.5 || deg >= 157.5) return 1;       // '|'
+    if (deg >= 67.5 && deg < 112.5) return 2;       // '-'
+    if (deg >= 22.5 && deg < 67.5) return 3;        // '/'
+    return 4;                                       // barra invertida
   }
 
   // Tabela LUT RGB 15-bit pré-computada (Zero alocação de strings em 60 FPS!)
@@ -2121,6 +2183,7 @@ window.PokeGameUI = (function() {
     const centerK = (syN >> 1) * sxN + (sxN >> 1);
     const shadeLast = SHADE_IDX.length - 1;
     const scrR = SCR_R, scrG = SCR_G, scrB = SCR_B, scrInk = SCR_INK;
+    if (!structureOn) computeLegacyEdges();
 
     if (!useFastBlit) {
       ctx.fillStyle = "#081024";
@@ -2141,7 +2204,7 @@ window.PokeGameUI = (function() {
 
         // 1) Resolve as S amostras da célula: cor final + "tinta" (o que o glifo deve desenhar)
         let entCount = 0, lo = 9, hi = -9, centerCt = 0;
-        let sumR = 0, sumG = 0, sumB = 0, edgeHit = false;
+        let sumR = 0, sumG = 0, sumB = 0, edgeCount = 0;
         let k = 0;
         for (let sy = 0; sy < syN; ++sy) {
           const y = y0 + sy;
@@ -2167,11 +2230,12 @@ window.PokeGameUI = (function() {
               const iU = y > 0 ? idx - sw : idx, iD = y + 1 < sh ? idx + sw : idx;
               if (gbId[iL] !== id || gbId[iR] !== id || gbId[iU] !== id || gbId[iD] !== id) {
                 ink = 1.0;
-                edgeHit = true;
+                ++edgeCount;
               } else {
                 const dn = Math.abs(gbNx[iR] - gbNx[iL]) + Math.abs(gbNy[iD] - gbNy[iU]);
                 const dz = Math.abs(gbZ[iR] - gbZ[iL]) + Math.abs(gbZ[iD] - gbZ[iU]);
-                ink = (dn > tN || dz > tZ) ? 0.9 : (0.299 * cr + 0.587 * cg + 0.114 * cb) * 0.72;
+                if (dn > tN || dz > tZ) { ink = 0.9; ++edgeCount; }
+                else ink = (0.299 * cr + 0.587 * cg + 0.114 * cb) * 0.72;
               }
               ++entCount;
             } else {
@@ -2189,7 +2253,60 @@ window.PokeGameUI = (function() {
         let gi, fgR, fgG, fgB, bgR, bgG, bgB;
         const contrast = hi - lo;
 
-        if (structureOn && contrast >= CONTRAST_MIN) {
+        // Limiar de contraste por tipo de célula (ver constantes): chão sensível, interior de entidade conservador
+        const minContrast = entCount === 0 ? CONTRAST_GROUND : (edgeCount > 0 ? CONTRAST_EDGE : CONTRAST_TEXTURE);
+
+        if (!structureOn) {
+          // Nível 1x1: estilo original (bordas Sobel por célula)
+          const i0 = y0 * sw + x0;
+          const cr = scrR[0], cg = scrG[0], cb = scrB[0];
+          const dir = legacyDir[i0], mag = legacyMag[i0];
+          if (gbId[i0] > 0) {
+            const id = gbId[i0];
+            const silhouette =
+              (c > 0 && gbId[i0 - 1] === 0) || (c < cols - 1 && gbId[i0 + 1] === 0) ||
+              (r > 0 && gbId[i0 - cols] === 0) || (r < rows - 1 && gbId[i0 + cols] === 0);
+            if (id === 7 || id === 2) {
+              bgR = (cr * 115) | 0; bgG = (cg * 155) | 0; bgB = (cb * 175) | 0;
+              fgR = Math.min(255, (cr * 255 + 75) | 0);
+              fgG = Math.min(255, (cg * 255 + 75) | 0);
+              fgB = Math.min(255, (cb * 255 + 75) | 0);
+              gi = ((c + r) & 1) === 0 ? GI_O : GI_PLUS;
+            } else if (silhouette) {
+              bgR = (cr * 48) | 0; bgG = (cg * 48) | 0; bgB = (cb * 62) | 0;
+              fgR = Math.min(255, (cr * 255 + 108) | 0);
+              fgG = Math.min(255, (cg * 255 + 108) | 0);
+              fgB = Math.min(255, (cb * 255 + 115) | 0);
+              gi = dir > 0 ? LEGACY_DIR_IDX[dir] : GI_HASH;
+            } else if (mag > 0.42 && dir > 0) {
+              bgR = (cr * 165) | 0; bgG = (cg * 165) | 0; bgB = (cb * 172) | 0;
+              fgR = Math.min(255, (cr * 255 + 96) | 0);
+              fgG = Math.min(255, (cg * 255 + 96) | 0);
+              fgB = Math.min(255, (cb * 255 + 96) | 0);
+              gi = LEGACY_DIR_IDX[dir];
+            } else {
+              bgR = (cr * 212) | 0; bgG = (cg * 212) | 0; bgB = (cb * 212) | 0;
+              fgR = Math.min(255, (cr * 255 + 64) | 0);
+              fgG = Math.min(255, (cg * 255 + 64) | 0);
+              fgB = Math.min(255, (cb * 255 + 64) | 0);
+              const luma = Math.min(1, 0.299 * cr + 0.587 * cg + 0.114 * cb);
+              gi = SHADE_IDX[Math.min(shadeLast, Math.max(1, (luma * shadeLast) | 0))];
+            }
+          } else {
+            bgR = (cr * 185) | 0; bgG = (cg * 185) | 0; bgB = (cb * 195) | 0;
+            fgR = Math.min(255, (cr * 255 + 44) | 0);
+            fgG = Math.min(255, (cg * 255 + 48) | 0);
+            fgB = Math.min(255, (cb * 255 + 58) | 0);
+            const ct = centerCt;
+            if (ct === 2) gi = GI_EQ;
+            else if (ct === 3) gi = GI_HASH;
+            else if (ct === 5) gi = GI_PLUS;
+            else if (ct === 4) gi = ((r & 1) === 0 && (c & 1) === 0) ? GI_COLON : GI_DOT;
+            else if (ct === 1) gi = GI_MIDDOT;
+            else if (mag > 0.20 && dir > 0) gi = LEGACY_DIR_IDX[dir];
+            else gi = ((r + c) & 1) === 0 ? GI_DOT : GI_COMMA;
+          }
+        } else if (contrast >= minContrast) {
           // 2a) Casamento de forma: o padrão de tinta quantizado (4 níveis/amostra) escolhe o glifo
           //     cujo desenho tem a mesma estrutura (|, /, \, -, _, cantos, pontos...). Resultado em cache.
           const mid = (lo + hi) * 0.5;
@@ -2214,21 +2331,12 @@ window.PokeGameUI = (function() {
           // 2b) Região plana: densidade por luminância (entidade) ou glifo do tipo de piso (ground)
           const mr = sumR * invS, mg = sumG * invS, mb = sumB * invS;
           if (entCount * 2 >= S) {
-            if (!structureOn && edgeHit) {
-              // Nível legado (1 amostra/célula): contorno de silhueta de 1 célula
-              bgR = (mr * 48) | 0; bgG = (mg * 48) | 0; bgB = (mb * 62) | 0;
-              fgR = Math.min(255, (mr * 255 + 108) | 0);
-              fgG = Math.min(255, (mg * 255 + 108) | 0);
-              fgB = Math.min(255, (mb * 255 + 115) | 0);
-              gi = GI_HASH;
-            } else {
-              bgR = (mr * 212) | 0; bgG = (mg * 212) | 0; bgB = (mb * 212) | 0;
-              fgR = Math.min(255, (mr * 255 + 64) | 0);
-              fgG = Math.min(255, (mg * 255 + 64) | 0);
-              fgB = Math.min(255, (mb * 255 + 64) | 0);
-              const luma = Math.min(1, 0.299 * mr + 0.587 * mg + 0.114 * mb);
-              gi = SHADE_IDX[Math.min(shadeLast, Math.max(1, (luma * shadeLast) | 0))];
-            }
+            bgR = (mr * 212) | 0; bgG = (mg * 212) | 0; bgB = (mb * 212) | 0;
+            fgR = Math.min(255, (mr * 255 + 64) | 0);
+            fgG = Math.min(255, (mg * 255 + 64) | 0);
+            fgB = Math.min(255, (mb * 255 + 64) | 0);
+            const luma = Math.min(1, 0.299 * mr + 0.587 * mg + 0.114 * mb);
+            gi = SHADE_IDX[Math.min(shadeLast, Math.max(1, (luma * shadeLast) | 0))];
           } else {
             bgR = (mr * 185) | 0; bgG = (mg * 185) | 0; bgB = (mb * 195) | 0;
             fgR = Math.min(255, (mr * 255 + 44) | 0);
