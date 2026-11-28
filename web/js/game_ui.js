@@ -84,6 +84,9 @@ window.PokeGameUI = (function() {
     facingYaw: 0.0,
     isMoving: false,
     walkCycle: 0.0,
+    moveBlend: 0.0,   // 0..1 suavizado: intensidade do ciclo de passos
+    gpsGoal: null,    // alvo do GPS real: o avatar anda até ele
+    lastGpsFix: null, // último fix do GPS (base do crédito de distância caminhada)
     camOrbitYaw: 0.0,
     camOrbitPitch: 0.56,
     camOrbitDist: 10.5, // Zoom de 2.5m (perto) até 55.0m (visão estratégica ampla!)
@@ -148,6 +151,14 @@ window.PokeGameUI = (function() {
     enemyAttackAnimUntil: 0,
     vfxList: [],       // Projéteis e feixes elementais em ASCII
     floatingTexts: [], // Textos de dano flutuantes
+    bursts: [],        // Partículas ASCII de impacto
+    // Coreografia (linha do tempo em ms de performance.now)
+    enterStart: 0,
+    pAtkStart: 0, pAtkDur: 260, eAtkStart: 0, eAtkDur: 360,
+    pHurtStart: 0, eHurtStart: 0,
+    shakeAmp: 0, shakeUntil: 0, punch: 0,
+    pPos: { x: -0.55, y: -0.4, z: -2.45 }, ePos: { x: 0.55, y: -0.3, z: -5.2 },
+    ending: false, endingWin: false, endingAt: 0,
     rewardCoins: 35,
     rewardDust: 900,
     rewardXp: 1200,
@@ -847,20 +858,23 @@ window.PokeGameUI = (function() {
           }
 
           // Se o jogador está usando o Joystick Livre, NÃO sobrescreve a posição dele!
-          if (cityState.navMode !== "GPS_LIVE") return;
+          if (cityState.navMode !== "GPS_LIVE") { cityState.lastGpsFix = null; cityState.gpsGoal = null; return; }
 
           const m = latLonToMeters(lat, lon);
-          const dx = m.x - cityState.playerX;
-          const dz = m.z - cityState.playerZ;
-          const dist = Math.hypot(dx, dz);
+          // Distância creditada = entre fixes consecutivos (não contra a posição que ainda está deslizando)
+          const ref = cityState.lastGpsFix || { x: cityState.playerX, z: cityState.playerZ };
+          const dist = Math.hypot(m.x - ref.x, m.z - ref.z);
+          cityState.lastGpsFix = { x: m.x, z: m.z };
           if (dist > 0.25 && dist < 120) {
-            cityState.facingYaw = Math.atan2(dx, -dz);
-            cityState.playerX = m.x;
-            cityState.playerZ = m.z;
-            cityState.isMoving = true;
             onPlayerWalkedMeters(dist * 2.5);
-            ensureS2CellsAroundPlayer();
-            updateGpsPillUI();
+            if (gameScene === "CITY_MAP") {
+              cityState.gpsGoal = { x: m.x, z: m.z };   // updateCityMovement desliza até aqui andando
+            } else {
+              cityState.playerX = m.x; cityState.playerZ = m.z;   // fora do mapa não há animação: posição direta
+              cityState.gpsGoal = null;
+            }
+          } else if (dist >= 120) {
+            cityState.playerX = m.x; cityState.playerZ = m.z; cityState.gpsGoal = null;   // salto grande: teleporta, sem crédito
           }
         },
         () => {},
@@ -945,27 +959,51 @@ window.PokeGameUI = (function() {
       }
     }
 
-    if (Math.abs(cityState.joyDx) < 0.05 && Math.abs(cityState.joyDz) < 0.05) {
+    const joyActive = !(Math.abs(cityState.joyDx) < 0.05 && Math.abs(cityState.joyDz) < 0.05);
+    const goal = cityState.gpsGoal;
+    const goalReached = !goal || Math.hypot(goal.x - cityState.playerX, goal.z - cityState.playerZ) <= 0.05;
+    if (goalReached) cityState.gpsGoal = null;       // só descarta ao chegar (tocar o joystick não perde o alvo do GPS)
+    const gpsActive = !joyActive && !goalReached;
+    // moveBlend: 0 parado .. 1 andando (suaviza início/fim do ciclo de passos)
+    cityState.moveBlend += (((joyActive || gpsActive) ? 1 : 0) - cityState.moveBlend) * Math.min(1, dt * 9.0);
+    if (!joyActive && !gpsActive) {
       cityState.isMoving = false;
+      // continua o ciclo de passos enquanto a intensidade decai (sem congelar no meio da passada)
+      if (cityState.moveBlend > 0.05) cityState.walkCycle += dt * 11.0 * cityState.moveBlend;
       return;
     }
 
     cityState.isMoving = true;
-    cityState.walkCycle += dt * 9.0;
+    cityState.walkCycle += dt * 11.0;
     const speed = 5.4;
+    let worldDx, worldDz, stepLen;
 
-    const sinY = Math.sin(cityState.camOrbitYaw);
-    const cosY = Math.cos(cityState.camOrbitYaw);
-    const worldDx = cityState.joyDx * cosY + cityState.joyDz * sinY;
-    const worldDz = -cityState.joyDx * sinY + cityState.joyDz * cosY;
-
-    cityState.playerX += worldDx * speed * dt;
-    cityState.playerZ += worldDz * speed * dt;
-    cityState.facingYaw = Math.atan2(worldDx, -worldDz);
+    if (joyActive) {
+      const sinY = Math.sin(cityState.camOrbitYaw);
+      const cosY = Math.cos(cityState.camOrbitYaw);
+      worldDx = cityState.joyDx * cosY + cityState.joyDz * sinY;
+      worldDz = -cityState.joyDx * sinY + cityState.joyDz * cosY;
+      stepLen = Math.hypot(worldDx, worldDz) * speed * dt;
+      cityState.playerX += worldDx * speed * dt;
+      cityState.playerZ += worldDz * speed * dt;
+    } else {
+      // GPS real: desliza até o ponto novo (em vez de teletransportar) com a animação de passos ativa
+      const gx = goal.x - cityState.playerX, gz = goal.z - cityState.playerZ;
+      const gd = Math.hypot(gx, gz);
+      stepLen = Math.min(gd, speed * dt);
+      worldDx = gx / gd; worldDz = gz / gd;
+      cityState.playerX += worldDx * stepLen;
+      cityState.playerZ += worldDz * stepLen;
+    }
+    // Vira suavemente para a direção do movimento (menor arco)
+    const wantYaw = Math.atan2(worldDx, -worldDz);
+    let dYaw = wantYaw - cityState.facingYaw;
+    dYaw = Math.atan2(Math.sin(dYaw), Math.cos(dYaw));
+    cityState.facingYaw += dYaw * Math.min(1, dt * 14.0);
 
     ensureS2CellsAroundPlayer();
     updateGpsPillUI();
-    onPlayerWalkedMeters(Math.hypot(worldDx, worldDz) * speed * dt * 2.8);
+    if (joyActive) onPlayerWalkedMeters(stepLen * 2.8);
 
     // Easter Egg Oficial do Pokémon GO: Caminhar para longe dos 3 iniciais faz surgir o Pikachu (#25)!
     const p = window.PokeStorage.getProfile();
@@ -1179,6 +1217,12 @@ window.PokeGameUI = (function() {
 
   function adjustZoom(deltaDist) {
     if (gameScene !== "CITY_MAP") return;
+    if (creator.active && !creator.leaving) {
+      // No criador o zoom aproxima/afasta do avatar (multiplicador sobre o foco atual)
+      creator.zoomMul = Math.max(0.55, Math.min(2.4, creator.zoomMul * (1 + deltaDist * 0.05)));
+      creator.lastInteract = performance.now();
+      return;
+    }
     cityState.camOrbitDist = Math.max(2.5, Math.min(55.0, cityState.camOrbitDist + deltaDist));
   }
 
@@ -1804,6 +1848,46 @@ window.PokeGameUI = (function() {
   let vBufNy = new Float32Array(vBufCap);
   let vBufNz = new Float32Array(vBufCap);
 
+  let battleVp = null;   // matriz view-projection do quadro de batalha (projeta os projéteis/estilhaços)
+
+  // Constantes por quadro da animação procedural (um objeto reaproveitado: zero alocação por entidade)
+  const ANIM_SCRATCH = {
+    minY: 0, invH: 1, h: 1.8, hx: 0.6, hz: 0.6,
+    sy: 1, sxz: 1, nod: 0, sway: 0, tail: 0, walk: 0, gaitS: 0, gaitC: 1,
+    flapOn: false, flap: 0, strike: 0, hurt: 0, shake: 0, faint: 0, cf: 1, sf: 0
+  };
+
+  // a: { seed, amp, walk (0..1), walkPhase, flap (bool), flapRate, pre (0..1 antecipação/agachar), strike (0..1 golpe),
+  //      hurt (0..1 dano), faint (0..1 desmaio) }
+  function prepAnim(mesh, a, t) {
+    const b = E.getMeshBounds(mesh);
+    const S = ANIM_SCRATCH;
+    const w = t + (a.seed || 0);
+    const amp = a.amp === undefined ? 1 : a.amp;
+    const pre = a.pre || 0, strike = a.strike || 0, hurt = a.hurt || 0, faint = a.faint || 0;
+    S.minY = b.minY; S.invH = 1 / b.h; S.h = b.h; S.hx = b.hx; S.hz = b.hz;
+    S.sy = (1 + 0.024 * amp * Math.sin(w * 2.3)) * (1 - 0.15 * pre + 0.12 * strike - 0.12 * hurt - 0.35 * faint);
+    S.sxz = (1 - 0.012 * amp * Math.sin(w * 2.3)) * (1 + 0.10 * pre - 0.07 * strike + 0.08 * hurt + 0.12 * faint);
+    S.nod = Math.sin(w * 1.9 + 0.8) * 0.045 * b.h * amp;
+    S.sway = Math.sin(w * 1.35) * 0.03 * b.h * amp;
+    const walk = a.walk || 0;
+    const wph = a.walkPhase !== undefined ? a.walkPhase : w * 8.0;
+    S.walk = walk; S.gaitS = Math.sin(wph); S.gaitC = Math.cos(wph);
+    S.tail = Math.sin(w * (3.2 + walk * 4.0) + 1.0) * amp;
+    S.flapOn = !!a.flap;
+    S.flap = a.flap ? Math.sin(w * (a.flapRate || 8.5)) : 0;
+    S.strike = strike; S.hurt = hurt; S.shake = Math.sin(t * 78.0);
+    S.faint = faint;
+    const fa = faint * 1.45;
+    S.cf = Math.cos(fa); S.sf = Math.sin(fa);
+    return S;
+  }
+
+  function isFlyingSpecies(speciesId) {
+    const sp = window.PokeData.getSpecies(speciesId);
+    return !!(sp && ((sp.types && sp.types.includes("Flying")) || sp.archetype === "winged_dragon" || sp.archetype === "bird_winged"));
+  }
+
   function rasterize3DScene(timeSec) {
     gbZ.fill(Infinity);
     gbId.fill(0);
@@ -1813,16 +1897,63 @@ window.PokeGameUI = (function() {
     let camBasis;
 
     if (gameScene === "CITY_MAP") {
-      const dist = cityState.camOrbitDist;
-      const pitch = cityState.camOrbitPitch;
-      const yaw = cityState.camOrbitYaw;
+      let dist = cityState.camOrbitDist;
+      let pitch = cityState.camOrbitPitch;
+      let yaw = cityState.camOrbitYaw;
+      let targetY = -0.85;
+      if (creator.active) {
+        // CRIADOR DE AVATAR: a câmera voa do alto até o avatar (posição de nascimento) e orbita; ao concluir, volta ao mapa
+        const nowC = performance.now();
+        const dtC = creator.lastT ? Math.min(0.1, (nowC - creator.lastT) / 1000) : 0.016;
+        creator.lastT = nowC; creator.dt = dtC;
+        const fly = Math.min(1, (nowC - creator.startAt) / 2800);
+        const e = fly < 0.5 ? 4 * fly * fly * fly : 1 - Math.pow(-2 * fly + 2, 3) / 2;
+        const f = creator.focus, c = creator.cur, kf = Math.min(1, dtC * 5.0);
+        c.dist += (f.dist * creator.zoomMul - c.dist) * kf; c.pitch += (f.pitch - c.pitch) * kf; c.ty += (f.ty - c.ty) * kf;
+        if (creator.yawGoal !== null) {
+          let dy = creator.yawGoal - cityState.camOrbitYaw;
+          dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+          cityState.camOrbitYaw += dy * Math.min(1, dtC * 4.0);
+          if (Math.abs(dy) < 0.02) creator.yawGoal = null;
+        } else if (!isDraggingLook && nowC - creator.lastInteract > 3500 && !creator.leaving) {
+          cityState.camOrbitYaw += dtC * 0.35;   // giro lento enquanto ninguém mexe
+        }
+        const pitchUser = (cityState.camOrbitPitch - 0.56) * 0.55;
+        // Celular: o painel cobre ~55% da altura; afasta a câmera para o avatar caber na parte livre da tela
+        const panelEl = document.getElementById("creator-panel");
+        const wideLayout = window.innerWidth >= 900;
+        creator.panelFrac = (!wideLayout && panelEl) ? Math.min(0.7, panelEl.offsetHeight / Math.max(1, window.innerHeight)) : 0;
+        const narrowK = wideLayout ? 1.0 : Math.min(2.6, 1 / Math.max(0.38, 1 - creator.panelFrac));
+        if (!creator.leaving) {
+          dist = 46 * (1 - e) + c.dist * narrowK * e;
+          pitch = 1.15 * (1 - e) + Math.max(0.02, Math.min(1.1, c.pitch + pitchUser)) * e;
+          yaw = cityState.camOrbitYaw + (1 - e) * 2.4;
+          targetY = -1.25 + c.ty * e;
+        } else {
+          const lt = Math.min(1, (nowC - creator.leaveAt) / 1400);
+          const e2 = lt < 0.5 ? 4 * lt * lt * lt : 1 - Math.pow(-2 * lt + 2, 3) / 2;
+          dist = c.dist * narrowK * (1 - e2) + cityState.camOrbitDist * e2;
+          pitch = Math.max(0.02, c.pitch + pitchUser) * (1 - e2) + cityState.camOrbitPitch * e2;
+          targetY = (-1.25 + c.ty) * (1 - e2) + -0.85 * e2;
+          if (lt >= 1) { creator.active = false; creator.leaving = false; }
+        }
+      }
       // Alvo 3D fixo no centro do treinador no plano do chão!
-      const target = { x: cityState.playerX, y: -0.85, z: cityState.playerZ };
+      const target = { x: cityState.playerX, y: targetY, z: cityState.playerZ };
       const eye = {
         x: target.x + Math.sin(yaw) * Math.cos(pitch) * dist,
         y: target.y + Math.sin(pitch) * dist,
         z: target.z + Math.cos(yaw) * Math.cos(pitch) * dist
       };
+      if (creator.active && !creator.leaving) {
+        // Centraliza o avatar na área LIVRE da tela (o painel cobre a lateral no desktop e o rodapé no celular)
+        const wide = window.innerWidth >= 900;
+        const halfH = Math.tan(fovY * 0.5) * dist, halfW = halfH * aspect;
+        const sx = wide ? (380 / window.innerWidth) : 0;                 // fração da largura coberta pelo painel
+        const sy = wide ? 0 : (creator.panelFrac || 0.5);               // centro da área livre acima do painel
+        const dx = -Math.cos(yaw) * sx * halfW, dz = Math.sin(yaw) * sx * halfW, dy = -sy * halfH;
+        eye.x += dx; eye.z += dz; eye.y += dy; target.x += dx; target.z += dz; target.y += dy;
+      }
       camBasis = E.mat4LookAtBasis(eye, target);
     } else if (gameScene === "AR_CAPTURE") {
       if (encounterIntroT < 1.0) {
@@ -1841,13 +1972,33 @@ window.PokeGameUI = (function() {
       };
       camBasis = E.mat4LookAtBasis(eye, target);
     } else if (gameScene === "LIVE_BATTLE") {
-      camBasis = E.mat4LookAtBasis({ x: 0.45, y: 0.55, z: 0.45 }, { x: 0.0, y: -0.65, z: -3.8 });
+      // Câmera de combate viva: balanço suave, aproxima no golpe (punch), segue o atacante e treme no impacto
+      const nowB = performance.now();
+      liveBattle.punch = Math.max(0, liveBattle.punch - 0.035);
+      const atkP = nowB - liveBattle.pAtkStart < liveBattle.pAtkDur ? -1 : (nowB - liveBattle.eAtkStart < liveBattle.eAtkDur ? 1 : 0);
+      let shx = 0, shy = 0;
+      if (nowB < liveBattle.shakeUntil) {
+        const k = Math.min(1, (liveBattle.shakeUntil - nowB) / 300);
+        shx = Math.sin(nowB * 0.09) * liveBattle.shakeAmp * k;
+        shy = Math.cos(nowB * 0.077) * liveBattle.shakeAmp * k * 0.8;
+      } else {
+        liveBattle.shakeAmp = 0;
+      }
+      const pl = liveBattle.punch;
+      const eyeB = {
+        x: 0.45 + Math.sin(timeSec * 0.31) * 0.28 + atkP * 0.12 + shx,
+        y: 0.55 + Math.sin(timeSec * 0.43) * 0.07 + shy,
+        z: 0.45 - pl * 0.5
+      };
+      const tgtB = { x: atkP * -0.22 + shx * 0.5, y: -0.65 + shy * 0.5, z: -3.8 - pl * 0.4 };
+      camBasis = E.mat4LookAtBasis(eyeB, tgtB);
     } else {
       camBasis = E.mat4LookAtBasis({ x: 0.0, y: 0.15, z: 0.0 }, { x: 0.0, y: -0.35, z: -4.2 });
     }
 
     const proj = E.mat4Perspective(fovY, aspect, 0.25, 180.0);
     const vp = E.mat4Mul(proj, camBasis.view);
+    battleVp = vp;   // também usada pelo criador de avatar para projetar rótulos
 
     const drawCmds = [];
     projectedClickTargets = [];
@@ -1856,7 +2007,14 @@ window.PokeGameUI = (function() {
       const p = window.PokeStorage.getProfile();
       // Compensação de escala em zoom distante: o tamanho aparente (escala/distância) cai só ~15% em vez
       // de ~55% até 55m, então avatar/Pokémon/PokéStops mantêm pixels suficientes para o detalhe aparecer.
-      const zoomComp = Math.pow(Math.max(1.0, cityState.camOrbitDist / 10.0), 0.85);
+      // Quase tamanho constante na tela (expoente 0.97): no zoom máximo (55m) o Pokémon continua com ~16+ células de altura
+      const zoomComp = Math.pow(Math.max(1.0, cityState.camOrbitDist / 10.0), 0.97);
+      // PokéStops/Ginásios têm posição geográfica real: crescem menos (não se sobrepõem). Os Pokémon selvagens (spawn
+      // aleatório ao redor do jogador) se afastam do avatar proporcionalmente ao zoom, para não virarem um bolo no centro.
+      const zoomPoi = Math.pow(Math.max(1.0, cityState.camOrbitDist / 10.0), 0.70);
+      const zoomSpread = Math.pow(Math.max(1.0, cityState.camOrbitDist / 10.0), 0.85);
+      // Pokémon e avatar são o foco: ganham até +45% de tamanho extra no zoom máximo (mais amostras = forma reconhecível)
+      const monBoost = 1.0 + 0.45 * Math.min(1.0, Math.max(0, (cityState.camOrbitDist / 10.0 - 1.0) / 3.5));
 
       // 1. ANEL 3D DE RAIO DE AÇÃO INVARIANTE À ROTAÇÃO DA CÂMERA (3.5m de raio no plano Y=-1.24)
       drawCmds.push({
@@ -1878,38 +2036,67 @@ window.PokeGameUI = (function() {
       });
 
       // 2. AVATAR 3D DO TREINADOR NO CENTRO DO MAPA (Altura humana proporcional ~1.88m)
-      const avScale = 1.08 * zoomComp;
-      const avatarMesh = E.buildTrainerAvatarMesh(p.gender, p.avatar, cityState.walkCycle, cityState.isMoving);
+      const creatorMode = creator.active && !creator.leaving;
+      let avScale = 1.0 * zoomComp * monBoost;
+      let avatarMesh, avYaw = cityState.facingYaw + Math.PI, avGender = p.gender, avFlash = 0;
+      if (creator.active && creator.leaving) {
+        // Saída do criador: escala e direção do avatar voltam ao normal suavemente (sem "pulo")
+        const k = Math.min(1, (performance.now() - creator.leaveAt) / 700);
+        avScale = CREATOR_AV_SCALE * (1 - k) + avScale * k;
+        let dy = avYaw - CREATOR_AV_YAW; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+        avYaw = CREATOR_AV_YAW + dy * k;
+      }
+      if (creatorMode) {
+        // Boneco do criador: config ao vivo, fixo no ponto de nascimento (a câmera orbita), anda no lugar se pedido
+        avScale = CREATOR_AV_SCALE;
+        avYaw = CREATOR_AV_YAW;
+        avGender = creator.gender;
+        const dtW = creator.dt || (1 / 60);
+        creator.walkBlend += ((creator.walk ? 1 : 0) - creator.walkBlend) * Math.min(1, dtW * 7.0);
+        if (creator.walk) creator.walkCycle += dtW * 11.0;
+        avatarMesh = E.buildTrainerAvatarMesh(avGender, creator.cfg, creator.walkCycle, creator.walkBlend, timeSec);
+        avFlash = Math.max(0, 1 - (performance.now() - creator.changedAt) / 520) * 0.5;
+      } else {
+        avatarMesh = E.buildTrainerAvatarMesh(p.gender, p.avatar, cityState.walkCycle, cityState.moveBlend, timeSec);
+      }
       const mAvatar = E.mat4Mul(
         E.mat4Translation(cityState.playerX, -1.25, cityState.playerZ),
-        E.mat4Mul(E.mat4RotY(cityState.facingYaw + Math.PI), E.mat4Scale(avScale, avScale, avScale))
+        E.mat4Mul(E.mat4RotY(avYaw), E.mat4Scale(avScale, avScale, avScale))
       );
-      drawCmds.push({ id: 10, mesh: avatarMesh, model: mAvatar });
+      drawCmds.push({ id: 10, mesh: avatarMesh, model: mAvatar, flash: avFlash, flashCol: avFlash > 0 ? [0.55, 1.0, 0.92] : null });
 
       // 3. POKÉMON PARCEIRO (BUDDY) CAMINHANDO AO SEU LADO EM PROPORÇÃO REALISTA
       const buddyMon = p.pokemonBox.find(m => m.uid === p.buddyUid) || p.pokemonBox[0];
-      if (buddyMon) {
-        const bScale = E.computeVisualScale(buddyMon.speciesId, 1.0) * 0.82 * zoomComp;
+      if (buddyMon && !creatorMode) {
+        const bScale = E.computeVisualScale(buddyMon.speciesId, 1.0) * 0.82 * zoomComp * monBoost;
         const bMesh = E.getPokemonMesh(buddyMon.speciesId, buddyMon.isShiny);
         const bx = cityState.playerX - Math.cos(cityState.facingYaw) * (1.25 * zoomComp);
         const bz = cityState.playerZ - Math.sin(cityState.facingYaw) * (1.25 * zoomComp);
-        const by = -1.22 + Math.abs(Math.sin(timeSec * 5.0)) * 0.10;
+        const mvB = cityState.moveBlend;
+        const hopB = Math.abs(Math.sin(cityState.walkCycle * 1.15));
+        const by = -1.22 + (mvB > 0.15 ? hopB * 0.16 * mvB : Math.abs(Math.sin(timeSec * 1.6)) * 0.015);
         const mBuddy = E.mat4Mul(
           E.mat4Translation(bx, by, bz),
           E.mat4Mul(E.mat4RotY(cityState.facingYaw + Math.PI), E.mat4Scale(bScale, bScale, bScale))
         );
-        drawCmds.push({ id: 11, mesh: bMesh, model: mBuddy, speciesId: buddyMon.speciesId });
+        drawCmds.push({
+          id: 11, mesh: bMesh, model: mBuddy, speciesId: buddyMon.speciesId,
+          anim: {
+            seed: 3.1, walk: mvB, walkPhase: cityState.walkCycle * 1.15, flap: isFlyingSpecies(buddyMon.speciesId),
+            flapRate: 6 + 8 * mvB, pre: mvB > 0.15 ? Math.pow(1 - hopB, 3) * 0.55 * mvB : 0, amp: 1
+          }
+        });
       }
 
       // (Edifícios permanecem desenhados apenas planos no chão em renderBackdropSamples, sem obstruir Ginásios!)
 
       // 4. POKÉSTOPS 3D
-      cityState.pokestops.forEach((ps, idx) => {
+      (creatorMode ? [] : cityState.pokestops).forEach((ps, idx) => {
         const dPlayer = Math.hypot(ps.x - cityState.playerX, ps.z - cityState.playerZ);
         if (dPlayer > 56.0) return;
         const isCd = Date.now() < ps.cooldownUntil;
         const psMesh = E.buildPokestop3DMesh(isCd);
-        const psScale = zoomComp;
+        const psScale = zoomPoi;
         const mPs = E.mat4Mul(
           E.mat4Translation(ps.x, -1.25, ps.z),
           E.mat4Mul(E.mat4RotY(timeSec * (isCd ? 0.5 : 1.6) + idx), E.mat4Scale(psScale, psScale, psScale))
@@ -1928,10 +2115,10 @@ window.PokeGameUI = (function() {
       });
 
       // 5. GINÁSIOS 3D + GUARDIÃO 3D NO TOPO + BOSS DE RAID
-      cityState.gyms.forEach((gym, idx) => {
+      (creatorMode ? [] : cityState.gyms).forEach((gym, idx) => {
         const dPlayer = Math.hypot(gym.x - cityState.playerX, gym.z - cityState.playerZ);
         if (dPlayer > 64.0) return;
-        const gScale = zoomComp;
+        const gScale = zoomPoi;
         const gMesh = E.buildGymTower3DMesh(gym.color);
         const mGym = E.mat4Mul(
           E.mat4Translation(gym.x, -1.25, gym.z),
@@ -1946,7 +2133,10 @@ window.PokeGameUI = (function() {
           E.mat4Translation(gym.x, -1.25 + (2.68 + Math.sin(timeSec * 2.5) * 0.10) * gScale, gym.z),
           E.mat4Mul(E.mat4RotY(timeSec * 1.2), E.mat4Scale(guardScale, guardScale, guardScale))
         );
-        drawCmds.push({ id: 35 + (idx % 5), mesh: guardMesh, model: mGuard, speciesId: topDefenderId, useLod: dPlayer > 14.0 });
+        drawCmds.push({
+          id: 35 + (idx % 5), mesh: guardMesh, model: mGuard, speciesId: topDefenderId, useLod: dPlayer > 14.0,
+          anim: dPlayer < 30.0 ? { seed: idx * 2.3, amp: 1.1, flap: isFlyingSpecies(topDefenderId), flapRate: 8 } : null
+        });
 
         const pt = E.projectPoint3D(vp, gym.x, -1.25 + 3.4 * gScale, gym.z, canvas.width, canvas.height);
         if (pt) {
@@ -1960,7 +2150,7 @@ window.PokeGameUI = (function() {
       });
 
       // 6. BALÃO 3D DOS VILÕES (TEAM ROCKET CYBER)
-      if (cityState.villainBalloon.active) {
+      if (cityState.villainBalloon.active && !creatorMode) {
         const dPlayer = Math.hypot(cityState.villainBalloon.x - cityState.playerX, cityState.villainBalloon.z - cityState.playerZ);
         const vMesh = E.buildVillainBalloon3DMesh();
         const by = cityState.villainBalloon.y + Math.sin(timeSec * 1.8) * 0.25;
@@ -1982,22 +2172,37 @@ window.PokeGameUI = (function() {
 
       // 7. POKÉMONS SELVAGENS 3D EM VOLTA DO TREINADOR NO MAPA (Proporção fiel em relação ao Avatar!)
       const spawnRingMesh = E.buildAnchorRingMesh(0.68, 0.07, 20);
-      cityState.wildSpawns.forEach((sp, idx) => {
+      (creatorMode ? [] : cityState.wildSpawns).forEach((sp, idx) => {
         const dPlayer = Math.hypot(sp.x - cityState.playerX, sp.z - cityState.playerZ);
         if (dPlayer > 42.0) return;
         const wMesh = E.getPokemonMesh(sp.mon.speciesId, sp.mon.isShiny);
         const ageSec = Math.max(0.05, (performance.now() - (sp.spawnedAt || 0)) / 1000.0);
         const popElastic = ageSec < 0.65 ? Math.min(1.12, (ageSec / 0.5) * 1.12) : 1.0;
-        const sScale = E.computeVisualScale(sp.mon.speciesId, sp.mon.scaleVariation) * popElastic * zoomComp;
-        const hop = Math.abs(Math.sin(timeSec * 3.5 + idx)) * 0.08;
+        // Selvagens ×1.35: Pokémon são o foco do mapa (antes ficavam menores que os PokéStops e ilegíveis)
+        const sScale = E.computeVisualScale(sp.mon.speciesId, sp.mon.scaleVariation) * popElastic * zoomComp * monBoost * 1.35;
+        // Pulinho em ciclos (agacha → salta → aterrissa) em vez de quicar o tempo todo; Pokémons voadores flutuam
+        const flyer = isFlyingSpecies(sp.mon.speciesId);
+        const cyc = ((timeSec * 0.55 + idx * 0.37) % 1.0);
+        const jumpT = cyc < 0.34 ? cyc / 0.34 : 1.0;                      // 0..1 durante o salto, depois descansa
+        const hop = flyer ? 0.55 + Math.sin(timeSec * 2.1 + idx) * 0.12 : Math.sin(jumpT * Math.PI) * 0.22 * (cyc < 0.34 ? 1 : 0);
+        const squash = flyer ? 0 : (cyc < 0.05 ? cyc / 0.05 * 0.7 : (cyc > 0.34 && cyc < 0.42 ? (1 - (cyc - 0.34) / 0.08) * 0.8 : 0));
+        // Posição de desenho afastada do avatar conforme o zoom (ver zoomSpread)
+        const wxp = cityState.playerX + (sp.x - cityState.playerX) * zoomSpread;
+        const wzp = cityState.playerZ + (sp.z - cityState.playerZ) * zoomSpread;
         const mWild = E.mat4Mul(
-          E.mat4Translation(sp.x, -1.22 + hop, sp.z),
-          E.mat4Mul(E.mat4RotY(sp.rotY + Math.sin(timeSec + idx) * 0.4), E.mat4Scale(sScale, sScale, sScale))
+          E.mat4Translation(wxp, -1.22 + hop * sScale, wzp),
+          E.mat4Mul(E.mat4RotY(sp.rotY + Math.sin(timeSec * 0.6 + idx) * 0.5), E.mat4Scale(sScale, sScale, sScale))
         );
-        drawCmds.push({ id: 50 + idx, mesh: wMesh, model: mWild, speciesId: sp.mon.speciesId, useLod: dPlayer > 11.0 });
-        drawCmds.push({ id: 7, mesh: spawnRingMesh, model: E.mat4Translation(sp.x, -1.24, sp.z) });
+        drawCmds.push({
+          id: 50 + idx, mesh: wMesh, model: mWild, speciesId: sp.mon.speciesId, useLod: dPlayer > 11.0,
+          anim: dPlayer < 38.0 ? { seed: idx * 1.7, pre: squash, flap: flyer, flapRate: 7.5 + (idx % 3), amp: 1 } : null
+        });
+        drawCmds.push({
+          id: 7, mesh: spawnRingMesh,
+          model: E.mat4Mul(E.mat4Translation(wxp, -1.24, wzp), E.mat4Scale(sScale, 1, sScale))
+        });
 
-        const pt = E.projectPoint3D(vp, sp.x, -1.22 + 1.55 * sScale, sp.z, canvas.width, canvas.height);
+        const pt = E.projectPoint3D(vp, wxp, -1.22 + 1.55 * sScale, wzp, canvas.width, canvas.height);
         if (pt) {
           projectedClickTargets.push({
             type: "WILD", index: idx, x: pt.x, y: pt.y, r: 44,
@@ -2057,7 +2262,12 @@ window.PokeGameUI = (function() {
           mesh: E.getPokemonMesh(wildMon.speciesId, wildMon.isShiny),
           model: mMon,
           speciesId: wildMon.speciesId,
-          tintRedLaser: forceRedEnergy
+          tintRedLaser: forceRedEnergy,
+          // Vivo no encontro: respira, balança a cabeça/cauda, bate asas; fica "tenso" (agachado) ao ver a bola voando
+          anim: ball.state === 2 ? null : {
+            seed: 2.2, amp: 1.25, flap: isFlyingSpecies(wildMon.speciesId), flapRate: 9,
+            pre: ball.state === 1 ? 0.5 : 0, hurt: ball.state === 3 ? 0.25 : 0
+          }
         });
 
         // Projeta a caixa 2D real do Pokémon 3D para o Anel de Captura cobrir o diâmetro do monstro!
@@ -2087,27 +2297,43 @@ window.PokeGameUI = (function() {
       });
 
     } else if (gameScene === "LIVE_BATTLE" && liveBattle.active) {
-      // ARENA DE BATALHA 3D AO VIVO 100% EM ASCII!
+      // ARENA DE BATALHA 3D AO VIVO: poses por linha do tempo (entrada, antecipação → investida → recuo, dano, K.O.)
       const now = performance.now();
       const pMon = liveBattle.playerMon;
       const eMon = liveBattle.enemyMon;
+      const enterE = Math.min(1, (now - liveBattle.enterStart) / 950);
+      const enterBack = 1 + 2.70158 * Math.pow(enterE - 1, 3) + 1.70158 * Math.pow(enterE - 1, 2);   // easeOutBack
+      const enterFlash = Math.max(0, 1 - enterE * 2.2);
 
       // 1. Pokémon Inimigo / Raid Boss 3D ao fundo da arena
       if (eMon) {
-        const eAttackT = now < liveBattle.enemyAttackAnimUntil ? Math.sin(((liveBattle.enemyAttackAnimUntil - now) / 360) * Math.PI) : 0;
-        const eScale = E.computeVisualScale(eMon.speciesId, 1.0) * (liveBattle.isRaidEncounter ? 1.75 : 1.42);
-        const ex = 0.55 - eAttackT * 0.35;
-        const ey = -1.10 + Math.abs(Math.sin(timeSec * 3.0)) * 0.10 + eAttackT * 0.25;
-        const ez = -5.2 + eAttackT * 1.35;
+        const ePose = attackPose(now, liveBattle.eAtkStart, liveBattle.eAtkDur);
+        const eHurt = hurtPose(now, liveBattle.eHurtStart);
+        const chargeK = liveBattle.enemyIsChargingSpecial ? Math.min(1, 1 - (liveBattle.enemySpecialFireAt - now) / 1700) : 0;
+        const faintK = (liveBattle.ending && liveBattle.endingWin) ? Math.min(1, (now - liveBattle.endingAt) / 900) : 0;
+        const eFlyer = isFlyingSpecies(eMon.speciesId);
+        const eScale = E.computeVisualScale(eMon.speciesId, 1.0) * (liveBattle.isRaidEncounter ? 1.75 : 1.42) * Math.max(0.02, enterBack);
+        const ex = 0.55 + eHurt.knock * 0.22 - ePose.lunge * 0.5;
+        const ey = -1.10 + (eFlyer ? 0.55 + Math.sin(timeSec * 2.4) * 0.12 : Math.abs(Math.sin(timeSec * 2.2)) * 0.05) +
+          Math.max(0, ePose.lunge) * 0.28 - faintK * 0.12;
+        const ez = -5.2 - eHurt.knock * 0.55 + ePose.lunge * 1.9;
+        liveBattle.ePos.x = ex; liveBattle.ePos.y = ey; liveBattle.ePos.z = ez;
         const mEnemy = E.mat4Mul(
           E.mat4Translation(ex, ey, ez),
-          E.mat4Mul(E.mat4RotY(-0.25), E.mat4Scale(eScale, eScale, eScale))
+          E.mat4Mul(E.mat4RotY(-0.25 + Math.sin(timeSec * 0.7) * 0.08), E.mat4Scale(eScale, eScale, eScale))
         );
+        const chargeFlash = chargeK * 0.42 * (0.5 + 0.5 * Math.sin(now * 0.035));
         drawCmds.push({
           id: 61,
           mesh: E.getPokemonMesh(eMon.speciesId, eMon.isShiny),
           model: mEnemy,
-          speciesId: eMon.speciesId
+          speciesId: eMon.speciesId,
+          flash: Math.max(eHurt.flash, enterFlash, chargeFlash),
+          flashCol: (chargeFlash > eHurt.flash && chargeFlash > enterFlash) ? [1.0, 0.25, 0.25] : null,
+          anim: {
+            seed: 7.3, amp: 1.35, pre: Math.min(1, ePose.pre + chargeK * 0.85), strike: ePose.strike,
+            hurt: eHurt.hurt, faint: faintK, flap: eFlyer, flapRate: 11, walk: 0
+          }
         });
         drawCmds.push({
           id: 7,
@@ -2116,23 +2342,36 @@ window.PokeGameUI = (function() {
         });
       }
 
-      // 2. Pokémon do Jogador 3D em primeiro plano (com investida 3D e esquiva lateral 3D!)
+      // 2. Pokémon do Jogador 3D em primeiro plano (investida, esquiva lateral, dano, comemoração)
       if (pMon) {
-        const pAttackT = now < liveBattle.playerAttackAnimUntil ? Math.sin(((liveBattle.playerAttackAnimUntil - now) / 280) * Math.PI) : 0;
-        const dodgeX = now < liveBattle.dodgeUntil ? liveBattle.dodgeOffsetX : 0;
-        const pScale = E.computeVisualScale(pMon.speciesId, 1.0) * 1.32;
-        const px = -0.55 + dodgeX * 1.35 + pAttackT * 0.45;
-        const py = -1.15 + Math.abs(Math.sin(timeSec * 3.6)) * 0.08 + pAttackT * 0.22;
-        const pz = -2.45 - pAttackT * 1.15;
+        const pPose = attackPose(now, liveBattle.pAtkStart, liveBattle.pAtkDur);
+        const pHurt = hurtPose(now, liveBattle.pHurtStart);
+        const dodging = now < liveBattle.dodgeUntil;
+        const dodgeK = dodging ? Math.sin(((liveBattle.dodgeUntil - now) / 650) * Math.PI) : 0;
+        const dodgeX = dodgeK * liveBattle.dodgeOffsetX;
+        const faintK = (liveBattle.ending && !liveBattle.endingWin) ? Math.min(1, (now - liveBattle.endingAt) / 900) : 0;
+        const cheer = (liveBattle.ending && liveBattle.endingWin) ? Math.abs(Math.sin((now - liveBattle.endingAt) * 0.011)) * 0.3 : 0;
+        const pFlyer = isFlyingSpecies(pMon.speciesId);
+        const pScale = E.computeVisualScale(pMon.speciesId, 1.0) * 1.32 * Math.max(0.02, enterBack);
+        const px = -0.55 + dodgeX * 1.35 + pPose.lunge * 0.55 + pHurt.knock * -0.2;
+        const py = -1.15 + (pFlyer ? 0.5 + Math.sin(timeSec * 2.6) * 0.1 : Math.abs(Math.sin(timeSec * 2.4)) * 0.04) +
+          Math.max(0, pPose.lunge) * 0.26 + cheer - faintK * 0.1;
+        const pz = -2.45 - pPose.lunge * 1.35 + pHurt.knock * 0.4;
+        liveBattle.pPos.x = px; liveBattle.pPos.y = py; liveBattle.pPos.z = pz;
         const mPlayer = E.mat4Mul(
           E.mat4Translation(px, py, pz),
-          E.mat4Mul(E.mat4RotY(Math.PI - 0.35), E.mat4Scale(pScale, pScale, pScale))
+          E.mat4Mul(E.mat4RotY(Math.PI - 0.35 + dodgeX * 0.35), E.mat4Scale(pScale, pScale, pScale))
         );
         drawCmds.push({
           id: 60,
           mesh: E.getPokemonMesh(pMon.speciesId, pMon.isShiny),
           model: mPlayer,
-          speciesId: pMon.speciesId
+          speciesId: pMon.speciesId,
+          flash: Math.max(pHurt.flash, enterFlash),
+          anim: {
+            seed: 1.9, amp: 1.3, pre: pPose.pre, strike: pPose.strike, hurt: pHurt.hurt, faint: faintK,
+            flap: pFlyer, flapRate: 11, walk: 0
+          }
         });
         drawCmds.push({
           id: 7,
@@ -2217,8 +2456,9 @@ window.PokeGameUI = (function() {
     const ldx = lightDir.x, ldy = lightDir.y, ldz = lightDir.z;
     const texOut = TEX_SAMPLE_OUT;
     const wxOn = gameScene !== "EVOLUTION_CUTSCENE";   // cutscene cósmica não sofre clima
-    const wxLight = wxOn ? WXV.lightMul : 1;
-    const fogE = WXV.fogK - 0.015;               // névoa extra do clima (0 em tempo limpo: entidades intactas)
+    // Clima nunca escurece/embaça as entidades a ponto de sumirem: piso de luz e teto de névoa (legibilidade > realismo)
+    const wxLight = wxOn ? Math.max(0.82, WXV.lightMul) : 1;
+    const fogE = Math.min(0.01, WXV.fogK - 0.015);   // névoa extra do clima (0 em tempo limpo: entidades intactas)
     const fogOn = wxOn && fogE > 0.002;
     const fcR = WXV.fogCol[0], fcG = WXV.fogCol[1], fcB = WXV.fogCol[2];
     // LOD de triângulos só no nível legado: com subamostragem, remover triângulos abre furos visíveis.
@@ -2246,9 +2486,42 @@ window.PokeGameUI = (function() {
 
       // 1. Transforma todos os vértices da malha uma única vez por drawCmd (coordenadas em AMOSTRAS)
       let meshMinX = sw, meshMaxX = -1, meshMinY = sh, meshMaxY = -1, anyVisible = false;
+      const an = cmd.anim ? prepAnim(cmd.mesh, cmd.anim, timeSec) : null;
       for (let vi = 0; vi < vLen; ++vi) {
         const v = verts[vi];
-        const px = v.pos.x, py = v.pos.y, pz = v.pos.z;
+        let px = v.pos.x, py = v.pos.y, pz = v.pos.z;
+        if (an !== null) {
+          // Animação procedural (respirar, cabeça, cauda, pernas, asas, golpe, dano, desmaio) por altura/lado do vértice
+          const ny = (py - an.minY) * an.invH;
+          py = an.minY + (py - an.minY) * an.sy;
+          px *= an.sxz; pz *= an.sxz;
+          if (ny > 0.55) {
+            const k = ny - 0.55;
+            pz += (an.nod + an.strike * an.h * 0.28) * k * 2.0;
+            px += an.sway * (ny - 0.25);
+          } else {
+            px += an.sway * ny * 0.45;
+          }
+          if (pz < -0.3 * an.hz) px += an.tail * (-pz / an.hz - 0.3) * 0.38 * an.hx;
+          if (an.walk > 0 && ny < 0.36) {
+            // Peso suave esquerda/direita (sem corte duro em x=0: evita rasgar barriga/frente/trás)
+            let sx = px / (0.28 * an.hx); sx = sx > 1 ? 1 : (sx < -1 ? -1 : sx);
+            const side = sx * ((pz > 0.25 * an.hz) ? 1 : (pz < -0.25 * an.hz ? -1 : 1));
+            const kk = (0.36 - ny) * 2.78 * an.walk;
+            pz += an.gaitS * side * 0.16 * an.h * kk;
+            const lift = an.gaitC * side;
+            if (lift > 0) py += lift * 0.07 * an.h * kk;
+          }
+          if (an.flapOn && ny > 0.2 && ny < 0.98) {
+            const ax = px < 0 ? -px : px;
+            if (ax > 0.35 * an.hx) py += an.flap * (ax - 0.35 * an.hx) * 0.85;
+          }
+          if (an.hurt > 0) px += an.shake * an.hurt * 0.06 * an.h * (ny + 0.3);
+          if (an.faint > 0) {
+            const x2 = px * an.cf - py * an.sf, y2 = px * an.sf + py * an.cf + an.hx * an.sf * 0.9;
+            px = x2; py = y2;
+          }
+        }
         const cw = mvp[3] * px + mvp[7] * py + mvp[11] * pz + mvp[15];
         if (cw <= 0.15) {
           vBufOk[vi] = 0;
@@ -2286,6 +2559,8 @@ window.PokeGameUI = (function() {
       const cmdId = cmd.id;
       const tintLaser = Boolean(cmd.tintRedLaser);
       const tintEvo = Boolean(cmd.tintEvolutionMorph);
+      const flashK = cmd.flash > 0.01 ? Math.min(1, cmd.flash) : 0;      // clarão de dano/entrada/carga (mistura com a cor)
+      const flR = cmd.flashCol ? cmd.flashCol[0] : 1, flG = cmd.flashCol ? cmd.flashCol[1] : 1, flB = cmd.flashCol ? cmd.flashCol[2] : 1;
 
       for (let t = 0; t < indices.length; t += 3) {
         const i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
@@ -2407,6 +2682,12 @@ window.PokeGameUI = (function() {
               gbColR[idx] = texR * (0.90 + 0.20 * ndotl);
               gbColG[idx] = texG * (0.97 + 0.07 * ndotl);
               gbColB[idx] = texB * (1.10 - 0.24 * ndotl);
+              if (flashK > 0) {
+                gbColR[idx] += (flR - gbColR[idx]) * flashK;
+                gbColG[idx] += (flG - gbColG[idx]) * flashK;
+                gbColB[idx] += (flB - gbColB[idx]) * flashK;
+                gbLight[idx] = Math.max(gbLight[idx], 1.0 + 0.35 * flashK);
+              }
               if (fogOn) {
                 // Névoa/chuva também afeta as entidades (profundidade = 1 / soma(w_i * (1/w_vertice_i)))
                 const depth = 1.0 / (w0 * iw0 + w1 * iw1 + w2 * iw2);
@@ -2455,6 +2736,8 @@ window.PokeGameUI = (function() {
         : (pSlantCols < -0.07 ? CHAR_TO_IDX.get("/") : (pSlantCols > 0.07 ? CHAR_TO_IDX.get("\\") : CHAR_TO_IDX.get("|")));
     }
     const pLen = WXV.precipLen;
+    const haloOn = wxActive;
+    const isEntityId = (id) => id > 0 && id !== 7 && id !== 2;
 
     if (!useFastBlit) {
       ctx.fillStyle = "#081024";
@@ -2495,6 +2778,13 @@ window.PokeGameUI = (function() {
                 cr = Math.min(1.0, cr / maxC + spec);
                 cg = Math.min(1.0, cg / maxC + spec);
                 cb = Math.min(1.0, cb / maxC + spec);
+              }
+              if (id !== 7 && id !== 2) {
+                // Entidades (Pokémon/avatar/POIs) com cor mais viva e levemente mais clara que o chão: leitura imediata
+                const lu = 0.299 * cr + 0.587 * cg + 0.114 * cb;
+                cr = Math.min(1.0, Math.max(0, lu + (cr - lu) * 1.28 + 0.04));
+                cg = Math.min(1.0, Math.max(0, lu + (cg - lu) * 1.28 + 0.04));
+                cb = Math.min(1.0, Math.max(0, lu + (cb - lu) * 1.28 + 0.04));
               }
               // Silhueta (vizinho de outra entidade/fundo) e vincos 3D (normal/profundidade) em escala de amostra
               const iL = x > 0 ? idx - 1 : idx, iR = x + 1 < sw ? idx + 1 : idx;
@@ -2592,9 +2882,11 @@ window.PokeGameUI = (function() {
           gi = shapeCache[key];
           if (gi === 255) { gi = matchGlyphKey(key); shapeCache[key] = gi; }
           const ih = 1.0 / hN, il = lN > 0 ? 1.0 / lN : 0;
-          fgR = Math.min(255, ((hR * ih) * 255 + 56) | 0);
-          fgG = Math.min(255, ((hG * ih) * 255 + 56) | 0);
-          fgB = Math.min(255, ((hB * ih) * 255 + 62) | 0);
+          // Chão: glifos "silenciosos" (+28) para a hierarquia visual; entidades mantêm contraste forte (+56)
+          const fgLift = entCount === 0 ? 28 : 56;
+          fgR = Math.min(255, ((hR * ih) * 255 + fgLift) | 0);
+          fgG = Math.min(255, ((hG * ih) * 255 + fgLift) | 0);
+          fgB = Math.min(255, ((hB * ih) * 255 + fgLift + 6) | 0);
           bgR = ((lN > 0 ? lR * il : hR * ih) * 204) | 0;
           bgG = ((lN > 0 ? lG * il : hG * ih) * 204) | 0;
           bgB = ((lN > 0 ? lB * il : hB * ih) * 212) | 0;
@@ -2619,6 +2911,16 @@ window.PokeGameUI = (function() {
             else if (centerCt === 4) gi = ((r & 1) === 0 && (c & 1) === 0) ? GI_COLON : GI_DOT;
             else if (centerCt === 1) gi = GI_MIDDOT;
             else gi = ((r + c) & 1) === 0 ? GI_DOT : GI_COMMA;
+          }
+        }
+
+        // 2b') Halo escuro ao redor das entidades: separa o contorno do Pokémon do chão detalhado (leitura em zoom-out)
+        if (entCount === 0 && haloOn) {
+          const hy = (y0 + (syN >> 1)) * sw + (x0 + (sxN >> 1));
+          if ((c > 0 && isEntityId(gbId[hy - sxN])) || (c < cols - 1 && isEntityId(gbId[hy + sxN])) ||
+              (r > 0 && isEntityId(gbId[hy - sw * syN])) || (r < rows - 1 && isEntityId(gbId[hy + sw * syN]))) {
+            bgR = (bgR * 0.42) | 0; bgG = (bgG * 0.44) | 0; bgB = (bgB * 0.52) | 0;
+            fgR = (fgR * 0.55) | 0; fgG = (fgG * 0.58) | 0; fgB = (fgB * 0.66) | 0;
           }
         }
 
@@ -2682,7 +2984,8 @@ window.PokeGameUI = (function() {
     // EFEITOS VISUAIS EM ASCII SOBRE O GRID (FEIXE LASER DA POKÉBOLA, VFX DE BATALHA, DNA DE EVOLUÇÃO)
     // ============================================================================
     if (gameScene === "CITY_MAP") {
-      drawCityFloatingLabels();
+      if (creator.active) drawCreatorOverlay(timeSec);
+      else drawCityFloatingLabels();
     } else if (gameScene === "AR_CAPTURE" && wildMon) {
       drawCaptureAsciiLaserAndRing(timeSec);
     } else if (gameScene === "LIVE_BATTLE" && liveBattle.active) {
@@ -2725,9 +3028,11 @@ window.PokeGameUI = (function() {
     const fovMinY = canvas.height * 0.16, fovMaxY = canvas.height * 0.82;
 
     const visibleLabels = [];
+    // Em zoom-out os Pokémon continuam identificáveis pelo nome (a distância de etiqueta cresce com o zoom)
+    const zl = Math.max(1.0, cityState.camOrbitDist / 10.0);
     for (const t of projectedClickTargets) {
       const dist = t.dPlayer !== undefined ? t.dPlayer : 10.0;
-      const maxDist = t.isStarter ? 24.0 : (t.type === "WILD" ? 13.5 : (t.type === "POKESTOP" ? 14.5 : 21.0));
+      const maxDist = t.isStarter ? 24.0 * zl : (t.type === "WILD" ? 13.5 * zl : (t.type === "POKESTOP" ? 14.5 : 21.0));
       if (dist > maxDist) continue;
       if (!t.isStarter && (t.x < fovMinX || t.x > fovMaxX || t.y < fovMinY || t.y > fovMaxY)) continue;
       visibleLabels.push(t);
@@ -2741,7 +3046,7 @@ window.PokeGameUI = (function() {
     });
 
     const drawnBoxes = [];
-    const maxLabelsOnScreen = 4;
+    const maxLabelsOnScreen = zl > 2.0 ? 7 : 4;
 
     for (const t of visibleLabels) {
       if (drawnBoxes.length >= maxLabelsOnScreen) break;
@@ -3254,6 +3559,12 @@ window.PokeGameUI = (function() {
 
     liveBattle.vfxList = [];
     liveBattle.floatingTexts = [];
+    liveBattle.bursts = [];
+    liveBattle.pLag = undefined; liveBattle.eLag = undefined;
+    liveBattle.enterStart = performance.now();
+    liveBattle.pAtkStart = liveBattle.eAtkStart = liveBattle.pHurtStart = liveBattle.eHurtStart = 0;
+    liveBattle.shakeAmp = 0; liveBattle.shakeUntil = 0; liveBattle.punch = 0;
+    liveBattle.ending = false; liveBattle.endingWin = false; liveBattle.endingAt = 0;
     liveBattle.rewardCoins = rewardCoins;
     liveBattle.rewardDust = rewardDust;
     liveBattle.rewardXp = isRaid ? 2500 : 1200;
@@ -3290,23 +3601,111 @@ window.PokeGameUI = (function() {
     }
   }
 
-  function spawnBattleAsciiVfx(fromPlayer, elemType, isSpecial) {
+  // Projétil elemental em 3D (posição interpolada entre os dois Pokémons e projetada na tela a cada quadro).
+  // delayMs: espera o golpe "sair" da animação do atacante. dmg/kind são aplicados só quando o projétil CHEGA.
+  function spawnBattleAsciiVfx(fromPlayer, elemType, isSpecial, dmg = 0, delayMs = 0) {
     const vfx = getElementVfxConfig(elemType);
-    const startX = fromPlayer ? canvas.width * 0.34 : canvas.width * 0.62;
-    const startY = fromPlayer ? canvas.height * 0.65 : canvas.height * 0.36;
-    const endX   = fromPlayer ? canvas.width * 0.62 : canvas.width * 0.34;
-    const endY   = fromPlayer ? canvas.height * 0.36 : canvas.height * 0.65;
-
     liveBattle.vfxList.push({
       fromPlayer,
       isSpecial,
       color: vfx.color,
       glow: vfx.glow,
       chars: vfx.chars,
-      startX, startY, endX, endY,
       progress: 0.0,
-      speed: isSpecial ? 1.85 : 3.4
+      speed: isSpecial ? 1.55 : 3.0,
+      startAt: performance.now() + delayMs,
+      dmg
     });
+  }
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3); }
+
+  // Pose de ataque (antecipação → investida → recuperação): pre (agachar), strike (esticar) e lunge (deslocamento 0..1)
+  function attackPose(now, start, dur) {
+    const out = { pre: 0, strike: 0, lunge: 0 };
+    if (!start) return out;
+    const u = (now - start) / dur;
+    if (u < 0 || u >= 1) return out;
+    if (u < 0.30) { const k = u / 0.30; out.pre = k * k; out.lunge = -0.22 * k; }
+    else if (u < 0.52) { const k = (u - 0.30) / 0.22; out.pre = 1 - k; out.strike = k; out.lunge = -0.22 + 1.22 * easeOutCubic(k); }
+    else { const k = (u - 0.52) / 0.48; out.strike = 1 - k; out.lunge = 1 - easeOutCubic(k); }
+    return out;
+  }
+
+  function hurtPose(now, start) {
+    const h = start ? (now - start) / 400 : 1;
+    if (h < 0 || h >= 1) return { hurt: 0, knock: 0, flash: 0 };
+    const k = 1 - h;
+    return { hurt: k, knock: k * k, flash: Math.max(0, 1 - h * 2.4) };
+  }
+
+  function shakeCamera(amp, ms) {
+    liveBattle.shakeAmp = Math.max(liveBattle.shakeAmp, amp);
+    liveBattle.shakeUntil = performance.now() + ms;
+  }
+
+  function spawnImpactBurst(sx, sy, color, count) {
+    const chars = ["*", "+", "x", "#", "%", "o", "·"];
+    for (let i = 0; i < count; ++i) {
+      const a = Math.random() * Math.PI * 2, sp = 90 + Math.random() * 260;
+      liveBattle.bursts.push({
+        x: sx, y: sy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 70, life: 1.0,
+        ch: chars[(Math.random() * chars.length) | 0], color: i % 3 === 0 ? "#ffffff" : color
+      });
+    }
+  }
+
+  // Projeta um ponto do mundo da arena usando a câmera do quadro atual (null se atrás da câmera)
+  function projectBattlePoint(x, y, z) {
+    return battleVp ? E.projectPoint3D(battleVp, x, y, z, canvas.width, canvas.height) : null;
+  }
+
+  // Projétil chegou: aplica dano, dispara reação de dano, estilhaços e tremor de câmera
+  function onBattleVfxImpact(v) {
+    const now = performance.now();
+    const toEnemy = v.fromPlayer;
+    const tgt = toEnemy ? liveBattle.ePos : liveBattle.pPos;
+    const pt = projectBattlePoint(tgt.x, tgt.y + 0.7, tgt.z);
+    const sx = pt ? pt.x : canvas.width * (toEnemy ? 0.62 : 0.34), sy = pt ? pt.y : canvas.height * (toEnemy ? 0.36 : 0.6);
+    if (liveBattle.ending) return;
+
+    if (toEnemy) {
+      liveBattle.enemyHp = Math.max(0, liveBattle.enemyHp - v.dmg);
+      liveBattle.eHurtStart = now;
+      spawnImpactBurst(sx, sy, v.color, v.isSpecial ? 34 : 14);
+      shakeCamera(v.isSpecial ? 0.16 : 0.055, v.isSpecial ? 420 : 200);
+      liveBattle.punch = v.isSpecial ? 1.0 : 0.5;
+      addBattleFloatingText(v.isSpecial ? `* ${(liveBattle.playerMon.chargedMove || "ESPECIAL").toUpperCase()}! -${v.dmg}` : `-${v.dmg}`,
+        sx + (Math.random() - 0.5) * 40, sy - 30, v.isSpecial ? "#fde047" : "#ffffff", v.isSpecial ? 24 : 18);
+      if (liveBattle.enemyHp <= 0) beginBattleEnding(true);
+    } else {
+      const dodged = now < liveBattle.dodgeUntil;
+      const shielded = v.isSpecial && now < liveBattle.shieldActiveUntil;
+      const dmg = shielded ? 0 : (dodged ? Math.max(1, Math.round(v.dmg * 0.28)) : v.dmg);
+      liveBattle.playerHp = Math.max(0, liveBattle.playerHp - dmg);
+      if (shielded) {
+        spawnImpactBurst(sx, sy, "#c084fc", 20);
+        addBattleFloatingText("[SHIELD] BLOQUEADO!", sx, sy - 30, "#c084fc", 20);
+      } else {
+        if (!dodged) { liveBattle.pHurtStart = now; shakeCamera(v.isSpecial ? 0.2 : 0.07, v.isSpecial ? 480 : 220); }
+        spawnImpactBurst(sx, sy, v.color, dodged ? 6 : (v.isSpecial ? 30 : 12));
+        addBattleFloatingText(dodged ? `>> -${dmg}` : (v.isSpecial ? `* ${(liveBattle.enemyMon.chargedMove || "ESPECIAL").toUpperCase()} -${dmg}` : `-${dmg}`),
+          sx, sy - 30, v.isSpecial ? "#ef4444" : "#fb7185", v.isSpecial ? 22 : 17);
+      }
+      if (liveBattle.playerHp <= 0) beginBattleEnding(false);
+    }
+  }
+
+  // Fim de combate com tempo de "desmaio" + K.O. antes de mostrar o resultado
+  function beginBattleEnding(playerWon) {
+    if (liveBattle.ending) return;
+    liveBattle.ending = true;
+    liveBattle.endingWin = playerWon;
+    liveBattle.endingAt = performance.now();
+    shakeCamera(0.22, 700);
+    liveBattle.punch = 1.0;
+    liveBattle.enemyIsChargingSpecial = false;   // sem brilho de carga durante o K.O.
+    addBattleFloatingText(playerWon ? "K.O.!" : "DERROTA...", canvas.width * 0.5, canvas.height * 0.42, playerWon ? "#fde047" : "#fb7185", 44);
   }
 
   function addBattleFloatingText(text, x, y, color = "#fde047", size = 18) {
@@ -3314,10 +3713,11 @@ window.PokeGameUI = (function() {
   }
 
   function triggerPlayerAttack(isCharged = false) {
-    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active) return;
+    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active || liveBattle.ending) return;
     const now = performance.now();
+    // Sem spam enquanto a animação do golpe anterior ainda está na fase de antecipação/investida (toque rápido continua fluido)
+    if (!isCharged && now - liveBattle.pAtkStart < liveBattle.pAtkDur * 0.55) return;
     const pMon = liveBattle.playerMon;
-    const eMon = liveBattle.enemyMon;
     const pSp = window.PokeData.getSpecies(pMon.speciesId);
     const elemType = pSp.types[0];
 
@@ -3327,32 +3727,25 @@ window.PokeGameUI = (function() {
         return;
       }
       liveBattle.playerEnergy = 0;
-      liveBattle.playerAttackAnimUntil = now + 450;
+      liveBattle.pAtkStart = now; liveBattle.pAtkDur = 640;
+      liveBattle.playerAttackAnimUntil = now + 640;
       window.PokeAudio.playAttack(true);
-      spawnBattleAsciiVfx(true, elemType, true);
-
       const dmg = Math.max(26, Math.round((pMon.cp / 24) * (1.2 + pMon.ivAtk / 30)));
-      liveBattle.enemyHp = Math.max(0, liveBattle.enemyHp - dmg);
-      addBattleFloatingText(`* ${pMon.chargedMove.toUpperCase()}! -${dmg}`, canvas.width * 0.60, canvas.height * 0.26, "#fde047", 22);
+      spawnBattleAsciiVfx(true, elemType, true, dmg, 640 * 0.40);
     } else {
       liveBattle.playerEnergy = Math.min(100, liveBattle.playerEnergy + 14);
-      liveBattle.playerAttackAnimUntil = now + 240;
+      liveBattle.pAtkStart = now; liveBattle.pAtkDur = 300;
+      liveBattle.playerAttackAnimUntil = now + 300;
       window.PokeAudio.playAttack(false);
-      spawnBattleAsciiVfx(true, elemType, false);
-
       const dmg = Math.max(6, Math.round((pMon.cp / 82) * (1.0 + pMon.ivAtk / 45)));
-      liveBattle.enemyHp = Math.max(0, liveBattle.enemyHp - dmg);
-      addBattleFloatingText(`-${dmg}`, canvas.width * 0.62 + (Math.random() - 0.5) * 40, canvas.height * 0.32, "#ffffff", 16);
+      spawnBattleAsciiVfx(true, elemType, false, dmg, 300 * 0.40);
     }
 
     updateLiveBattleHudButtons();
-    if (liveBattle.enemyHp <= 0) {
-      finishLiveBattle(true);
-    }
   }
 
   function triggerBattleDodge(dir = 1) {
-    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active) return;
+    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active || liveBattle.ending) return;
     window.PokeAudio.playUiClick();
     liveBattle.dodgeOffsetX = dir >= 0 ? 1 : -1;
     liveBattle.dodgeUntil = performance.now() + 650;
@@ -3360,7 +3753,7 @@ window.PokeGameUI = (function() {
   }
 
   function triggerBattleShield() {
-    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active) return;
+    if (gameScene !== "LIVE_BATTLE" || !liveBattle.active || liveBattle.ending) return;
     if (liveBattle.playerShields <= 0) {
       window.PokeStorage.showToast("[SHIELD] Você já usou seus 2 Escudos Protetores!", "warn");
       return;
@@ -3428,80 +3821,87 @@ window.PokeGameUI = (function() {
     const dt = Math.min(0.08, (now - liveBattle.lastTickTime) / 1000.0);
     liveBattle.lastTickTime = now;
 
-    liveBattle.timerSec = Math.max(0, liveBattle.timerSec - dt);
-    if (liveBattle.timerSec <= 0) {
-      finishLiveBattle(liveBattle.enemyHp < liveBattle.playerHp);
-      return;
-    }
-
-    // IA do Oponente em Tempo Real
-    if (!liveBattle.enemyIsChargingSpecial && now >= liveBattle.enemyNextAttackAt) {
-      if (Math.random() < 0.34) {
-        liveBattle.enemyIsChargingSpecial = true;
-        liveBattle.enemySpecialFireAt = now + 1700;
-        addBattleFloatingText(`[!] ${liveBattle.enemyMon.name} CARREGANDO ${liveBattle.enemyMon.chargedMove.toUpperCase()}!`, canvas.width * 0.5, canvas.height * 0.20, "#fb7185", 16);
-      } else {
-        liveBattle.enemyAttackAnimUntil = now + 340;
-        liveBattle.enemyNextAttackAt = now + 1500 + Math.random() * 600;
-        window.PokeAudio.playAttack(false);
-        spawnBattleAsciiVfx(false, liveBattle.enemyMon.types[0], false);
-
-        const dodged = now < liveBattle.dodgeUntil;
-        const rawDmg = Math.max(5, Math.round(liveBattle.enemyMon.cp / 95));
-        const dmg = dodged ? Math.max(1, Math.round(rawDmg * 0.25)) : rawDmg;
-        liveBattle.playerHp = Math.max(0, liveBattle.playerHp - dmg);
-        addBattleFloatingText(dodged ? `>> -${dmg}` : `-${dmg}`, canvas.width * 0.34, canvas.height * 0.58, "#fb7185", 16);
+    // Fim de combate: espera a animação de desmaio/K.O. e só então mostra o resultado
+    if (liveBattle.ending) {
+      if (now - liveBattle.endingAt > 1500) { finishLiveBattle(liveBattle.endingWin); return; }
+    } else {
+      liveBattle.timerSec = Math.max(0, liveBattle.timerSec - dt);
+      if (liveBattle.timerSec <= 0) {
+        beginBattleEnding(liveBattle.enemyHp < liveBattle.playerHp);
       }
-    } else if (liveBattle.enemyIsChargingSpecial && now >= liveBattle.enemySpecialFireAt) {
-      liveBattle.enemyIsChargingSpecial = false;
-      liveBattle.enemyAttackAnimUntil = now + 500;
-      liveBattle.enemyNextAttackAt = now + 2200;
-      window.PokeAudio.playAttack(true);
-      spawnBattleAsciiVfx(false, liveBattle.enemyMon.types[0], true);
-
-      const shielded = now < liveBattle.shieldActiveUntil;
-      const dodged = now < liveBattle.dodgeUntil;
-      const rawDmg = Math.max(22, Math.round(liveBattle.enemyMon.cp / 30));
-      const dmg = shielded ? 0 : (dodged ? Math.round(rawDmg * 0.3) : rawDmg);
-      liveBattle.playerHp = Math.max(0, liveBattle.playerHp - dmg);
-      addBattleFloatingText(
-        shielded ? "[SHIELD] BLOQUEADO (0 DANO)!" : `* ${liveBattle.enemyMon.chargedMove.toUpperCase()} -${dmg}`,
-        canvas.width * 0.36, canvas.height * 0.54,
-        shielded ? "#c084fc" : "#ef4444", 20
-      );
     }
 
-    if (liveBattle.playerHp <= 0) {
-      finishLiveBattle(false);
-      return;
+    // IA do Oponente em Tempo Real: antecipa (telegraph) → dispara → recupera. Dano só é aplicado na chegada do projétil.
+    if (!liveBattle.ending) {
+      if (!liveBattle.enemyIsChargingSpecial && now >= liveBattle.enemyNextAttackAt) {
+        if (Math.random() < 0.34) {
+          liveBattle.enemyIsChargingSpecial = true;
+          liveBattle.enemySpecialFireAt = now + 1700;
+          addBattleFloatingText(`[!] ${liveBattle.enemyMon.name} CARREGANDO ${liveBattle.enemyMon.chargedMove.toUpperCase()}!`, canvas.width * 0.5, canvas.height * 0.20, "#fb7185", 16);
+        } else {
+          liveBattle.eAtkStart = now; liveBattle.eAtkDur = 420;
+          liveBattle.enemyAttackAnimUntil = now + 420;
+          liveBattle.enemyNextAttackAt = now + 1500 + Math.random() * 600;
+          window.PokeAudio.playAttack(false);
+          spawnBattleAsciiVfx(false, liveBattle.enemyMon.types[0], false, Math.max(5, Math.round(liveBattle.enemyMon.cp / 95)), 420 * 0.40);
+        }
+      } else if (liveBattle.enemyIsChargingSpecial && now >= liveBattle.enemySpecialFireAt) {
+        liveBattle.enemyIsChargingSpecial = false;
+        liveBattle.eAtkStart = now; liveBattle.eAtkDur = 700;
+        liveBattle.enemyAttackAnimUntil = now + 700;
+        liveBattle.enemyNextAttackAt = now + 2200;
+        window.PokeAudio.playAttack(true);
+        spawnBattleAsciiVfx(false, liveBattle.enemyMon.types[0], true, Math.max(22, Math.round(liveBattle.enemyMon.cp / 30)), 700 * 0.40);
+      }
     }
 
     ctx.save();
-    // 1. Projéteis Elementais e Feixes Especiais em Caracteres ASCII!
+    // 1. Projéteis elementais 3D (posição interpolada entre os Pokémons) desenhados em caracteres ASCII
     ctx.font = `bold ${cellH + 6}px 'Cascadia Mono', Consolas, monospace`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
     for (let i = liveBattle.vfxList.length - 1; i >= 0; --i) {
       const v = liveBattle.vfxList[i];
+      if (now < v.startAt) continue;                       // ainda na fase de antecipação do atacante
       v.progress += dt * v.speed;
       if (v.progress >= 1.0) {
         liveBattle.vfxList.splice(i, 1);
+        onBattleVfxImpact(v);
         continue;
       }
       const u = v.progress;
-      const x = v.startX * (1 - u) + v.endX * u;
-      const y = v.startY * (1 - u) + v.endY * u - Math.sin(u * Math.PI) * (v.isSpecial ? 60 : 25);
-
-      const count = v.isSpecial ? 9 : 4;
-      for (let k = 0; k < count; ++k) {
-        const spread = (k - count / 2) * (v.isSpecial ? 14 : 9);
-        const gx = x + spread * Math.cos(timeSec * 12 + k);
-        const gy = y + spread * Math.sin(timeSec * 12 + k);
-        ctx.fillStyle = k % 2 === 0 ? v.color : "#ffffff";
-        ctx.fillText(v.chars[(k + Math.floor(timeSec * 25)) % v.chars.length], gx, gy);
+      const a = v.fromPlayer ? liveBattle.pPos : liveBattle.ePos;
+      const b = v.fromPlayer ? liveBattle.ePos : liveBattle.pPos;
+      const trail = v.isSpecial ? 9 : 5;
+      for (let k = 0; k < trail; ++k) {                    // cabeça + cauda do projétil (cada ponto um pouco atrás)
+        const uu = Math.max(0, u - k * (v.isSpecial ? 0.035 : 0.045));
+        const wx = a.x + (b.x - a.x) * uu, wz = a.z + (b.z - a.z) * uu;
+        const wy = a.y + 0.7 + (b.y - a.y) * uu + Math.sin(uu * Math.PI) * (v.isSpecial ? 0.9 : 0.35);
+        const pt = projectBattlePoint(wx, wy, wz);
+        if (!pt) continue;
+        const wob = Math.sin(timeSec * 18 + k * 1.7) * (v.isSpecial ? 7 : 3.5);
+        ctx.globalAlpha = 1 - k / (trail + 1);
+        ctx.fillStyle = k === 0 ? "#ffffff" : (k % 2 === 0 ? v.color : v.glow);
+        ctx.font = `bold ${Math.round((cellH + 6) * (1.5 - k * 0.09))}px 'Cascadia Mono', Consolas, monospace`;
+        ctx.fillText(v.chars[(k + Math.floor(timeSec * 25)) % v.chars.length], pt.x + wob, pt.y + wob * 0.4);
       }
+      ctx.globalAlpha = 1;
     }
+
+    // 1b. Estilhaços ASCII de impacto (gravidade + fade)
+    ctx.font = `bold ${cellH + 4}px 'Cascadia Mono', Consolas, monospace`;
+    for (let i = liveBattle.bursts.length - 1; i >= 0; --i) {
+      const p = liveBattle.bursts[i];
+      p.life -= dt * 1.7;
+      if (p.life <= 0) { liveBattle.bursts.splice(i, 1); continue; }
+      p.vy += 420 * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      ctx.globalAlpha = Math.min(1, p.life * 1.6);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.ch, p.x, p.y);
+    }
+    ctx.globalAlpha = 1;
 
     // 2. Textos de Dano Flutuantes
     for (let i = liveBattle.floatingTexts.length - 1; i >= 0; --i) {
@@ -3523,8 +3923,30 @@ window.PokeGameUI = (function() {
     ctx.globalAlpha = 1.0;
 
     // 3. Barras Superiores de HP + Cronômetro da Arena 3D
-    const drawHpCard = (x, y, name, cp, hp, maxHp) => {
+    const asciiUi = document.body.classList.contains("ascii-ui-mode");
+    const drawHpCard = (x, y, name, cp, hp, maxHp, lagKey) => {
       const w = Math.min(200, canvas.width * 0.41), h = 52;
+      // "HP fantasma": a barra branca atrás desce devagar até o valor real (leitura do dano)
+      const pct = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
+      liveBattle[lagKey] = liveBattle[lagKey] === undefined ? pct : Math.max(pct, liveBattle[lagKey] - dt * 0.35);
+      const lag = liveBattle[lagKey];
+      const barCol = pct > 0.5 ? "#22c55e" : (pct > 0.22 ? "#f59e0b" : "#ef4444");
+      if (asciiUi) {
+        ctx.fillStyle = "rgba(7, 11, 20, 0.92)"; ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = "#2b3d66"; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+        ctx.fillStyle = "#5ee6ff"; ctx.fillRect(x, y, 3, h);
+        ctx.fillStyle = "#d7e2ff";
+        ctx.font = "bold 12px 'Cascadia Mono', Consolas, monospace";
+        ctx.textAlign = "left";
+        ctx.fillText(`${name} CP${cp}`, x + 11, y + 17);
+        const segs = 20, sw = (w - 22) / segs;
+        for (let i = 0; i < segs; ++i) {
+          const f = (i + 1) / segs;
+          ctx.fillStyle = f <= pct + 0.001 ? barCol : (f <= lag ? "#e8eefc" : "#16213b");
+          ctx.fillRect(x + 11 + i * sw, y + 29, Math.max(2, sw - 2), 11);
+        }
+        return;
+      }
       ctx.fillStyle = "rgba(15, 25, 48, 0.88)";
       ctx.strokeStyle = "#26ccaa";
       ctx.lineWidth = 2;
@@ -3538,16 +3960,16 @@ window.PokeGameUI = (function() {
       ctx.textAlign = "left";
       ctx.fillText(`${name} (CP ${cp})`, x + 10, y + 17);
 
-      const pct = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
-      const barCol = pct > 0.5 ? "#22c55e" : (pct > 0.22 ? "#f59e0b" : "#ef4444");
       ctx.fillStyle = "rgba(255,255,255,0.18)";
       ctx.fillRect(x + 10, y + 29, w - 20, 10);
+      ctx.fillStyle = "#e8eefc";
+      ctx.fillRect(x + 10, y + 29, (w - 20) * lag, 10);
       ctx.fillStyle = barCol;
       ctx.fillRect(x + 10, y + 29, (w - 20) * pct, 10);
     };
 
-    drawHpCard(14, 64, liveBattle.playerMon.name, liveBattle.playerMon.cp, liveBattle.playerHp, liveBattle.playerMaxHp);
-    drawHpCard(canvas.width - Math.min(200, canvas.width * 0.41) - 14, 64, liveBattle.enemyMon.name, liveBattle.enemyMon.cp, liveBattle.enemyHp, liveBattle.enemyMaxHp);
+    drawHpCard(14, 64, liveBattle.playerMon.name, liveBattle.playerMon.cp, liveBattle.playerHp, liveBattle.playerMaxHp, "pLag");
+    drawHpCard(canvas.width - Math.min(200, canvas.width * 0.41) - 14, 64, liveBattle.enemyMon.name, liveBattle.enemyMon.cp, liveBattle.enemyHp, liveBattle.enemyMaxHp, "eLag");
 
     ctx.fillStyle = "rgba(15, 25, 48, 0.9)";
     ctx.beginPath();
@@ -3812,6 +4234,7 @@ window.PokeGameUI = (function() {
         const dx = x - dragStartX;
         const dy = y - dragStartY;
         if (gameScene === "CITY_MAP") {
+          if (creator.active) { creator.yawGoal = null; creator.lastInteract = performance.now(); }
           cityState.camOrbitYaw -= dx * 0.0065;
           cityState.camOrbitPitch = Math.max(0.22, Math.min(1.28, cityState.camOrbitPitch + dy * 0.0045));
         } else if (gameScene === "AR_CAPTURE") {
@@ -4941,6 +5364,7 @@ window.PokeGameUI = (function() {
             </div>
           </div>
         ` : ""}
+        <button class="pogo-pill-btn" style="margin-top:12px;width:100%;" onclick="window.PokeGameUI.closeModal();window.PokeGameUI.openCharacterCreator(true)">EDITAR AVATAR 3D</button>
       </div>
     `);
   }
@@ -5006,21 +5430,244 @@ window.PokeGameUI = (function() {
     `);
   }
 
-  function finishCharacterCreation() {
+  // ============================================================================
+  // CRIADOR DE AVATAR 3D: o avatar é renderizado no mapa (posição de nascimento), a câmera voa até ele,
+  // arrastar gira, o painel edita ao vivo e a parte alterada pisca + recebe foco da câmera.
+  // ============================================================================
+  const CREATOR_AV_SCALE = 1.2;
+  const CREATOR_AV_YAW = 0.5;    // avatar fixo, levemente de 3/4; a câmera é que orbita
+  const CR_SW = {
+    skinColor:   ["#ffe0c8", "#f5c6a5", "#e8b48a", "#d99b72", "#b9784c", "#8d5524", "#6b3f1d", "#4a2a14"],
+    eyeColor:    ["#1c2433", "#5b3a1e", "#2f6fb5", "#2e8b57", "#7a7f8a", "#8e44ad"],
+    hairColor:   ["#15100c", "#3b2314", "#7a4a21", "#c9923a", "#e8d27a", "#b3322b", "#e8e8ee", "#5b3fd1", "#1fb5a5", "#e86aa8"],
+    outfitColor: ["#e62e2e", "#2088ff", "#26ccaa", "#f0b820", "#9858f0", "#ff7f7f", "#2b2f3a", "#f5f5f7", "#ff8a3d", "#3dbb5f"],
+    pantsColor:  ["#243a66", "#1a1d26", "#5c4a3a", "#7a8294", "#b33a3a", "#2f6a4f", "#e8e0d0", "#5b3fd1"],
+    shoeColor:   ["#f4f4f8", "#1a1d26", "#e62e2e", "#2088ff", "#f0b820", "#5c3a21"],
+    bagColor:    ["#384659", "#1a1d26", "#e62e2e", "#2088ff", "#2f6a4f", "#f0b820", "#9858f0", "#8d5524"]
+  };
+  const CR_HAIR = [["short", "Curto"], ["spiky", "Espetado"], ["long", "Longo"], ["pony", "Rabo"], ["bun", "Coque"], ["bald", "Careca"]];
+  const CR_HAT = [["cap", "Boné"], ["beanie", "Gorro"], ["none", "Nenhum"]];
+  const CR_TEAMS = [["Trovão", "Trovão"], ["Chama", "Chama"], ["Maré", "Maré"]];
+  const CR_TABS = [
+    { id: "body",   label: "CORPO",  focus: { dist: 5.6, pitch: 0.20, ty: 1.15 } },
+    { id: "hair",   label: "CABELO", focus: { dist: 3.5, pitch: 0.10, ty: 2.10 } },
+    { id: "outfit", label: "ROUPA",  focus: { dist: 4.3, pitch: 0.18, ty: 1.35 } },
+    { id: "extras", label: "EXTRAS", focus: { dist: 3.8, pitch: 0.16, ty: 1.55 } },
+    { id: "team",   label: "EQUIPE", focus: { dist: 5.6, pitch: 0.20, ty: 1.15 } }
+  ];
+  // Campo alterado → { rótulo, foco da câmera, lado (front/back) }
+  const CR_FIELD = {
+    gender:      { label: "PERSONAGEM", focus: { dist: 5.6, pitch: 0.2, ty: 1.15 }, side: "front", part: 1.3 },
+    skinColor:   { label: "PELE",       focus: { dist: 3.2, pitch: 0.14, ty: 1.9 }, side: "front", part: 1.95 },
+    eyeColor:    { label: "OLHOS",      focus: { dist: 3.0, pitch: 0.08, ty: 2.0 }, side: "front", part: 2.0 },
+    hairStyle:   { label: "CABELO",     focus: { dist: 3.5, pitch: 0.10, ty: 2.1 }, side: "back",  part: 2.2 },
+    hairColor:   { label: "COR DO CABELO", focus: { dist: 3.5, pitch: 0.10, ty: 2.1 }, side: "front", part: 2.2 },
+    hatKind:     { label: "CHAPÉU",     focus: { dist: 3.5, pitch: 0.10, ty: 2.2 }, side: "front", part: 2.3 },
+    outfitColor: { label: "TRAJE",      focus: { dist: 4.2, pitch: 0.18, ty: 1.5 }, side: "front", part: 1.5 },
+    pantsColor:  { label: "CALÇA",      focus: { dist: 3.8, pitch: 0.12, ty: 0.8 }, side: "front", part: 0.8 },
+    shoeColor:   { label: "TÊNIS",      focus: { dist: 3.5, pitch: 0.10, ty: 0.3 }, side: "front", part: 0.2 },
+    bagColor:    { label: "MOCHILA",    focus: { dist: 3.8, pitch: 0.16, ty: 1.4 }, side: "back",  part: 1.45 },
+    glasses:     { label: "ÓCULOS",     focus: { dist: 3.1, pitch: 0.08, ty: 2.0 }, side: "front", part: 2.0 },
+    team:        { label: "EQUIPE",     focus: { dist: 5.6, pitch: 0.2, ty: 1.15 }, side: "front", part: 1.3 }
+  };
+  const creator = {
+    active: false, leaving: false, startAt: 0, leaveAt: 0, lastT: 0,
+    tab: "body", cfg: {}, gender: "M", name: "AshASCII",
+    focus: { dist: 5.6, pitch: 0.20, ty: 1.15 }, cur: { dist: 12, pitch: 0.6, ty: 0.4 },
+    zoomMul: 1.0, yawGoal: null, lastInteract: 0,
+    walk: false, walkCycle: 0, walkBlend: 0,
+    changedAt: 0, changedLabel: "", changedValue: "", changedY: 1.3
+  };
+
+  function creatorFocusSide(side) {
+    // yaw da câmera: frente 3/4 ou costas 3/4 em relação ao avatar fixo
+    creator.yawGoal = side === "back" ? CREATOR_AV_YAW + Math.PI - 0.5 : CREATOR_AV_YAW - 0.45;
+  }
+
+  function openCharacterCreator(isEdit = false) {
     const p = window.PokeStorage.getProfile();
-    p.trainerName = (document.getElementById("inp-trainer-name").value || "AshASCII").trim();
-    p.gender = document.getElementById("inp-gender").value;
-    p.avatar.skinColor = document.getElementById("inp-skin").value;
-    p.avatar.outfitColor = document.getElementById("inp-outfit").value;
-    p.avatar.team = document.getElementById("inp-team").value;
+    if (creator.active) return;
+    if (isEdit && gameScene !== "CITY_MAP") return;
+    creator.isEdit = !!isEdit;
+    creator.active = true; creator.leaving = false;
+    creator.startAt = performance.now(); creator.lastT = 0;
+    creator.cfg = Object.assign({}, p.avatar);
+    creator.gender = p.gender || "M";
+    creator.name = p.trainerName && p.trainerName !== "Treinador" ? p.trainerName : "AshASCII";
+    creator.tab = "body"; creator.focus = Object.assign({}, CR_TABS[0].focus);
+    creator.cur = { dist: 12, pitch: 0.6, ty: 0.4 };
+    creator.zoomMul = 1.0; creator.walk = false; creator.walkBlend = 0;
+    creator.lastInteract = performance.now();
+    creatorFocusSide("front");
+    const nameInp = document.getElementById("inp-trainer-name");
+    if (nameInp) nameInp.value = creator.name;
+    const v = getVirtualLatLon();
+    const spawnEl = document.getElementById("creator-spawn");
+    if (spawnEl) spawnEl.textContent = isEdit ? "• editando seu avatar" : `• nascendo em ${v.lat.toFixed(4)}, ${v.lon.toFixed(4)}`;
+    document.body.classList.add("creating");
+    document.getElementById("onboarding-screen").style.display = "flex";
+    renderCreatorPanel();
+  }
+
+  function renderCreatorPanel() {
+    const tabsEl = document.getElementById("cr-tabs"), bodyEl = document.getElementById("cr-body");
+    if (!tabsEl || !bodyEl) return;
+    const c = creator.cfg;
+    tabsEl.innerHTML = CR_TABS.map((t) =>
+      `<button class="cr-tab${t.id === creator.tab ? " on" : ""}" onclick="window.PokeGameUI.creatorTab('${t.id}')">${t.label}</button>`).join("");
+    const sw = (field, label) => `<div class="cr-label">${label}</div><div class="cr-swatches">${CR_SW[field].map((col) =>
+      `<button class="cr-sw${c[field] === col ? " on" : ""}" style="background:${col}" title="${col}" aria-label="${label} ${col}" onclick="window.PokeGameUI.creatorSet('${field}','${col}')"></button>`).join("")}</div>`;
+    const chips = (field, list, label, cur) => `<div class="cr-label">${label}</div><div class="cr-chips">${list.map(([val, txt]) =>
+      `<button class="cr-chip${cur === val ? " on" : ""}" onclick="window.PokeGameUI.creatorSet('${field}','${val}')">${txt}</button>`).join("")}</div>`;
+    let html = "";
+    if (creator.tab === "body") {
+      html += chips("gender", [["M", "Treinador"], ["F", "Treinadora"]], "Personagem", creator.gender);
+      html += sw("skinColor", "Tom de pele");
+      html += sw("eyeColor", "Olhos");
+    } else if (creator.tab === "hair") {
+      html += chips("hairStyle", CR_HAIR, "Estilo do cabelo", c.hairStyle || "short");
+      html += sw("hairColor", "Cor do cabelo");
+      html += chips("hatKind", CR_HAT, "Chapéu", c.hatKind || "cap");
+    } else if (creator.tab === "outfit") {
+      html += sw("outfitColor", "Traje / blusa");
+      html += sw("pantsColor", "Calça");
+      html += sw("shoeColor", "Tênis");
+    } else if (creator.tab === "extras") {
+      html += sw("bagColor", "Mochila");
+      html += chips("glasses", [["on", "Óculos AR"], ["off", "Sem óculos"]], "Acessório", c.glasses ? "on" : "off");
+    } else {
+      html += chips("team", CR_TEAMS, "Equipe", c.team || "Trovão");
+      html += `<div class="cr-tip">Arraste no mapa para girar • role/pince para aproximar.<br>A parte que você muda pisca e a câmera vai até ela.</div>`;
+    }
+    bodyEl.innerHTML = html;
+  }
+
+  function creatorTab(id) {
+    const t = CR_TABS.find((x) => x.id === id);
+    if (!t || !creator.active) return;
+    creator.tab = id;
+    creator.focus = Object.assign({}, t.focus);
+    creatorFocusSide("front");
+    creator.lastInteract = performance.now();
+    window.PokeAudio.playUiClick();
+    renderCreatorPanel();
+  }
+
+  function creatorSet(field, value) {
+    if (!creator.active || creator.leaving) return;
+    const meta = CR_FIELD[field];
+    if (!meta) return;                       // só campos conhecidos (a API é pública)
+    if (field.endsWith("Color") && !(CR_SW[field] || []).includes(value)) return;
+    if (field === "gender" && value !== "M" && value !== "F") return;
+    if (field === "gender") creator.gender = value;
+    else if (field === "glasses") creator.cfg.glasses = value === "on";
+    else creator.cfg[field] = value;
+    const now = performance.now();
+    creator.changedAt = now;
+    creator.changedLabel = meta ? meta.label : field;
+    creator.changedValue = (field.endsWith("Color") || field === "glasses") ? "" : String(
+      (CR_HAIR.concat(CR_HAT, CR_TEAMS, [["M", "Treinador"], ["F", "Treinadora"], ["on", "Óculos AR"], ["off", "Sem óculos"]]).find((x) => x[0] === value) || [0, value])[1]);
+    creator.changedY = meta ? meta.part : 1.3;
+    if (meta) { creator.focus = Object.assign({}, meta.focus); creatorFocusSide(meta.side); }
+    creator.lastInteract = now;
+    window.PokeAudio.playUiClick();
+    renderCreatorPanel();
+  }
+
+  function creatorName(v) { creator.name = String(v || "").slice(0, 18); }
+
+  function creatorRotate(dir) {
+    creator.yawGoal = null;
+    cityState.camOrbitYaw += dir * 0.55;
+    creator.lastInteract = performance.now();
+    window.PokeAudio.playUiClick();
+  }
+
+  function creatorToggleWalk() {
+    creator.walk = !creator.walk;
+    const b = document.getElementById("cr-walk-btn");
+    if (b) b.classList.toggle("on", creator.walk);
+    creator.lastInteract = performance.now();
+    window.PokeAudio.playUiClick();
+  }
+
+  function creatorRandomize() {
+    const pick = (a) => a[(Math.random() * a.length) | 0];
+    const c = creator.cfg;
+    c.skinColor = pick(CR_SW.skinColor); c.eyeColor = pick(CR_SW.eyeColor); c.hairColor = pick(CR_SW.hairColor);
+    c.outfitColor = pick(CR_SW.outfitColor); c.pantsColor = pick(CR_SW.pantsColor); c.shoeColor = pick(CR_SW.shoeColor);
+    c.bagColor = pick(CR_SW.bagColor); c.hairStyle = pick(CR_HAIR)[0]; c.hatKind = pick(CR_HAT)[0]; c.glasses = Math.random() < 0.3;
+    creator.gender = Math.random() < 0.5 ? "M" : "F";
+    creator.changedAt = performance.now(); creator.changedLabel = "ALEATÓRIO"; creator.changedValue = ""; creator.changedY = 1.3;
+    creator.focus = Object.assign({}, CR_TABS[0].focus); creatorFocusSide("front");
+    creator.lastInteract = creator.changedAt;
+    window.PokeAudio.playUiClick();
+    renderCreatorPanel();
+  }
+
+  // Rótulos/colchetes ASCII sobre o avatar: parte alterada + enquadramento + local de nascimento
+  function drawCreatorOverlay(timeSec) {
+    if (!creator.active || creator.leaving || !battleVp) return;
+    const S = CREATOR_AV_SCALE, x = cityState.playerX, z = cityState.playerZ;
+    const head = projectBattlePoint(x, -1.25 + 2.55 * S, z), feet = projectBattlePoint(x, -1.25, z);
+    ctx.save();
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const accent = document.body.classList.contains("ascii-ui-mode") ? "#5ee6ff" : "#26ccaa";
+    if (head && feet) {
+      const h = Math.max(40, Math.abs(feet.y - head.y)), hw = h * 0.36;
+      const cx = (head.x + feet.x) / 2, top = Math.min(head.y, feet.y) - 8, bot = Math.max(head.y, feet.y) + 6;
+      const pulse = 0.55 + 0.45 * Math.sin(timeSec * 3.0);
+      ctx.strokeStyle = accent; ctx.globalAlpha = 0.5 + 0.35 * pulse; ctx.lineWidth = 2;
+      const L = Math.min(22, hw * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(cx - hw, top + L); ctx.lineTo(cx - hw, top); ctx.lineTo(cx - hw + L, top);
+      ctx.moveTo(cx + hw - L, top); ctx.lineTo(cx + hw, top); ctx.lineTo(cx + hw, top + L);
+      ctx.moveTo(cx - hw, bot - L); ctx.lineTo(cx - hw, bot); ctx.lineTo(cx - hw + L, bot);
+      ctx.moveTo(cx + hw - L, bot); ctx.lineTo(cx + hw, bot); ctx.lineTo(cx + hw, bot - L);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.font = "bold 11px 'Cascadia Mono', Consolas, monospace";
+      ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#04101a"; ctx.lineWidth = 3;
+      const tag = "● LOCAL DE NASCIMENTO";
+      ctx.strokeText(tag, cx, bot + 16); ctx.fillText(tag, cx, bot + 16);
+    }
+    const age = performance.now() - creator.changedAt;
+    if (creator.changedLabel && age < 2200) {
+      const pt = projectBattlePoint(x, -1.25 + creator.changedY * S, z);
+      if (pt) {
+        const a = Math.max(0, Math.min(1, (2200 - age) / 700));
+        const txt = `▸ ${creator.changedLabel}${creator.changedValue ? " · " + creator.changedValue : ""}`;
+        ctx.font = "bold 13px 'Cascadia Mono', Consolas, monospace";
+        const w = ctx.measureText(txt).width + 18, lx = Math.min(canvas.width - w / 2 - 8, pt.x + 60 + w / 2), ly = pt.y - Math.min(30, age * 0.03);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = "rgba(6, 12, 22, 0.88)"; ctx.fillRect(lx - w / 2, ly - 13, w, 26);
+        ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.strokeRect(lx - w / 2, ly - 13, w, 26);
+        ctx.beginPath(); ctx.moveTo(pt.x + 4, pt.y); ctx.lineTo(lx - w / 2, ly); ctx.stroke();
+        ctx.fillStyle = "#ffd36b"; ctx.fillText(txt, lx, ly + 1);
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
+  }
+
+  function finishCharacterCreation() {
+    if (!creator.active || creator.leaving) return;
+    const p = window.PokeStorage.getProfile();
+    p.trainerName = (creator.name || "AshASCII").trim() || "AshASCII";
+    p.gender = creator.gender;
+    p.avatar = Object.assign(p.avatar, creator.cfg);
     p.created = true;
     window.PokeStorage.save();
 
+    // A câmera sai do enquadramento do criador de volta ao mapa (ver rasterize3DScene)
+    creator.leaving = true; creator.leaveAt = performance.now(); creator.yawGoal = null;
+    document.body.classList.remove("creating");
     document.getElementById("onboarding-screen").style.display = "none";
     window.PokeAudio.init();
     window.PokeAudio.playGotchaFanfare();
-    spawnStarterTutorialTrioOnMap();
     updateHud();
+    if (creator.isEdit) return;   // só reedição do visual: sem iniciais nem tutorial
+    spawnStarterTutorialTrioOnMap();
     startRealGpsTracking(false);
     maybeShowScreenGuide("MAP_WELCOME", true);
   }
@@ -5119,9 +5766,6 @@ window.PokeGameUI = (function() {
 
     await window.PokeStorage.initAndLoad();
     const p = window.PokeStorage.getProfile();
-    if (!p.created) {
-      document.getElementById("onboarding-screen").style.display = "flex";
-    }
 
     const fileInp = document.getElementById("import-file-inp");
     if (fileInp) {
@@ -5146,6 +5790,8 @@ window.PokeGameUI = (function() {
     startRealGpsTracking(false);
     if (p.created) {
       maybeShowScreenGuide("MAP_WELCOME");
+    } else {
+      openCharacterCreator();   // avatar no mapa + câmera de voo + painel de edição ao vivo
     }
 
     if ("serviceWorker" in navigator) {
@@ -5209,6 +5855,13 @@ window.PokeGameUI = (function() {
     triggerAnomalyScanner,
     showSystemAndCrowdfundingModal,
     finishCharacterCreation,
+    creatorTab,
+    creatorSet,
+    creatorName,
+    creatorRotate,
+    creatorToggleWalk,
+    creatorRandomize,
+    openCharacterCreator,
     closeModal
   };
 })();

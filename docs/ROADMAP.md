@@ -86,6 +86,9 @@ Meta: qualquer pessoa abre a URL pública e joga o ciclo completo *criar persona
 - [ ] **Pontos de Parada** a partir do OpenStreetMap (Overpass → cache; filtros de segurança)
 - [ ] Mapa real com tiles legais (OpenFreeMap/PMTiles + MapLibre), atribuição "© OpenStreetMap contributors"
 - [x] **Clima** (Open-Meteo) afetando spawns e visual — `web/js/weather.js`: céu/nuvens/estrelas por horário e clima reais, chuva/garoa/neve/névoa/tempestade (relâmpago respeita `prefers-reduced-motion`), tipos favorecidos x1.8; toque na pílula `[CLIMA]` simula outros climas
+- [x] **Avatar 3D articulado + criador no mapa** — o boneco anda de verdade (pernas/joelhos/braços/tronco), o criador mostra o avatar na posição de nascimento com câmera de voo, giro por arraste, foco na parte editada (cabelo, chapéu, cores, mochila, óculos) — `buildTrainerAvatarMesh`, `openCharacterCreator`
+- [x] **Animação procedural dos Pokémon** (respirar, cabeça, cauda, pernas, asas, golpe, dano, K.O.) e batalha coreografada (antecipação → investida, projétil 3D, tremor de câmera, HP fantasma)
+- [x] **Legibilidade em zoom-out**: escala/afastamento dos Pokémon por zoom, halo escuro, cores vivas, chão "silencioso"; menus ASCII redesenhados (paleta fósforo, moldura dupla)
 - [ ] Anti-abuso de caminhada (limite de velocidade: acima de ~10 m/s não conta)
 - [ ] Modo "Caminhada comunitária": metas semanais de distância (local, sem servidor)
 

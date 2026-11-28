@@ -248,6 +248,14 @@ window.PokeStorage = (function() {
         hairColor: "#261c14",
         outfitColor: "#e62e2e",
         hatStyle: "visor_ar",
+        // Criador de avatar 3D: estilo de cabelo, chapéu, cores de calça/tênis/olhos/mochila, óculos
+        hairStyle: "short",     // short | spiky | long | pony | bun | bald
+        hatKind: "cap",         // cap | beanie | none
+        pantsColor: "#243a66",
+        shoeColor: "#f4f4f8",
+        eyeColor: "#1c2433",
+        bagColor: "#384659",
+        glasses: false,
         team: "Trovão" // Chama, Trovão, Maré
       },
       level: 1,

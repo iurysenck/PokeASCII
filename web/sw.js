@@ -1,4 +1,4 @@
-const CACHE_NAME = "pokeascii-ar-v21";
+const CACHE_NAME = "pokeascii-ar-v22";
 const ASSETS = [
   "./",
   "./index.html",
@@ -6,11 +6,11 @@ const ASSETS = [
   "./manifest.json",
   "./favicon.svg",
   "./assets/logo.svg",
-  "./js/pokedex_data.js?v=21",
-  "./js/audio_and_storage.js?v=21",
-  "./js/weather.js?v=21",
-  "./js/ascii_3d_engine.js?v=21",
-  "./js/game_ui.js?v=21"
+  "./js/pokedex_data.js?v=22",
+  "./js/audio_and_storage.js?v=22",
+  "./js/weather.js?v=22",
+  "./js/ascii_3d_engine.js?v=22",
+  "./js/game_ui.js?v=22"
 ];
 
 self.addEventListener("install", (event) => {

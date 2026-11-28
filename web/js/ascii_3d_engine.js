@@ -1061,6 +1061,25 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     return Math.max(0.38, Math.min(1.28, (0.24 + 0.36 * Math.sqrt(h)) * (scaleVariation || 1.0)));
   }
 
+  // Caixa envolvente da malha (calculada uma vez por malha): usada pela animação procedural.
+  function getMeshBounds(mesh) {
+    if (mesh.bnd) return mesh.bnd;
+    const vs = mesh.verts;
+    if (!vs.length) return { h: 1.8, minY: 0, hx: 0.6, hz: 0.6, zMin: -0.6, zMax: 0.6 };
+    let minY = Infinity, maxY = -Infinity, maxX = 0, zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < vs.length; ++i) {
+      const p = vs[i].pos;
+      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      const ax = Math.abs(p.x); if (ax > maxX) maxX = ax;
+      if (p.z < zMin) zMin = p.z; if (p.z > zMax) zMax = p.z;
+    }
+    mesh.bnd = {
+      h: Math.max(0.2, maxY - minY), minY,
+      hx: Math.max(0.2, maxX), hz: Math.max(0.2, Math.max(Math.abs(zMin), Math.abs(zMax))), zMin, zMax
+    };
+    return mesh.bnd;
+  }
+
   function getPokemonMesh(speciesId, isShiny = false) {
     const key = `${speciesId}_${isShiny ? 1 : 0}`;
     if (MESH_CACHE.has(key)) return MESH_CACHE.get(key);
@@ -1244,62 +1263,202 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     return vec3(r, g, b);
   }
 
-  function buildTrainerAvatarMesh(gender = "M", avatarCfg = {}, isWalking = false, timeSec = 0) {
+  // Caixa "pendurada" por um pivô (topo da caixa em py). angX>0 leva a ponta para trás (-Z); angZ abre para o lado.
+  // oy/oz deslocam a caixa no sistema local antes da rotação. Retorna a posição da ponta (centro da base).
+  function appendLimbBox(m, px, py, pz, hx, len, hz, angX, col, angZ = 0, oz = 0, oy = 0) {
+    const b = m.verts.length;
+    const cX = Math.cos(angX), sX = Math.sin(angX), cZ = Math.cos(angZ), sZ = Math.sin(angZ);
+    const y0 = -len + oy, y1 = oy, z0 = -hz + oz, z1 = hz + oz;
+    const pts = [
+      [-hx, y0, z1], [hx, y0, z1], [hx, y1, z1], [-hx, y1, z1],
+      [-hx, y0, z0], [hx, y0, z0], [hx, y1, z0], [-hx, y1, z0]
+    ];
+    for (let i = 0; i < 8; ++i) {
+      const x = pts[i][0], y = pts[i][1], z = pts[i][2];
+      const xa = x * cZ - y * sZ, ya = x * sZ + y * cZ;
+      const yb = ya * cX - z * sX, zb = ya * sX + z * cX;
+      m.verts.push({ pos: vec3(px + xa, py + yb, pz + zb), norm: vec3(0, 1, 0), uv: 0.1, col });
+    }
+    addQuad(m, b + 0, b + 1, b + 2, b + 3); addQuad(m, b + 5, b + 4, b + 7, b + 6);
+    addQuad(m, b + 4, b + 0, b + 3, b + 7); addQuad(m, b + 1, b + 5, b + 6, b + 2);
+    addQuad(m, b + 3, b + 2, b + 6, b + 7); addQuad(m, b + 4, b + 5, b + 1, b + 0);
+    const ey = (-len) * cZ, ex = (len) * sZ;           // ponta local (0,-len,0) após Z
+    return { x: px + ex, y: py + ey * cX, z: pz + ey * sX };
+  }
+
+  // Aplica rotação em X (inclinação) e Y (torção) em torno de um pivô aos vértices adicionados desde `from`.
+  function twistRange(m, from, pivY, angX, angY) {
+    const cx = Math.cos(angX), sx = Math.sin(angX), cy = Math.cos(angY), sy = Math.sin(angY);
+    for (let i = from; i < m.verts.length; ++i) {
+      const p = m.verts[i].pos;
+      const y = p.y - pivY;
+      const x1 = p.x * cy + p.z * sy, z1 = -p.x * sy + p.z * cy;
+      p.x = x1;
+      p.y = pivY + y * cx - z1 * sx;
+      p.z = y * sx + z1 * cx;
+    }
+  }
+
+  const AVATAR_CACHE = new Map();
+  const TAU = Math.PI * 2;
+
+  // Treinador 3D articulado. walkPhase = fase do ciclo de passos (rad); moveAmt = 0 (parado) .. 1 (andando).
+  // O ciclo é quantizado (24 passos) e cacheado: nenhum custo de geração por quadro depois do aquecimento.
+  function buildTrainerAvatarMesh(gender = "M", cfg = {}, walkPhase = 0, moveAmt = 0, timeSec = 0) {
+    const q = moveAmt < 0.1 ? 0 : (moveAmt < 0.6 ? 1 : 2);
+    const wp = ((walkPhase % TAU) + TAU) % TAU;
+    const stepIdx = q ? (Math.floor(wp / TAU * 24) % 24) : (Math.floor((((timeSec * 0.42) % 1) + 1) % 1 * 10) % 10);
+    const key = [gender, cfg.skinColor, cfg.outfitColor, cfg.hairColor, cfg.hairStyle, cfg.hatKind, cfg.pantsColor,
+      cfg.shoeColor, cfg.eyeColor, cfg.bagColor, cfg.glasses ? 1 : 0, q, stepIdx].join("|");
+    const hit = AVATAR_CACHE.get(key);
+    if (hit) { AVATAR_CACHE.delete(key); AVATAR_CACHE.set(key, hit); return hit; }   // LRU: mais recente por último
+    if (AVATAR_CACHE.size > 320) AVATAR_CACHE.delete(AVATAR_CACHE.keys().next().value);
+
     const m = createMesh();
-    const skin   = hexToVec3(avatarCfg.skinColor,   vec3(0.96, 0.78, 0.65));
-    const outfit = hexToVec3(avatarCfg.outfitColor, vec3(0.95, 0.38, 0.38));
-    const hair   = hexToVec3(avatarCfg.hairColor,   vec3(0.45, 0.28, 0.85));
+    const skin   = hexToVec3(cfg.skinColor,   vec3(0.96, 0.78, 0.65));
+    const outfit = hexToVec3(cfg.outfitColor, vec3(0.95, 0.38, 0.38));
+    const hair   = hexToVec3(cfg.hairColor,   vec3(0.15, 0.11, 0.08));
+    const pants  = hexToVec3(cfg.pantsColor,  vec3(0.14, 0.22, 0.38));
+    const shoes  = hexToVec3(cfg.shoeColor,   vec3(0.96, 0.96, 0.98));
+    const eyeCol = hexToVec3(cfg.eyeColor,    vec3(0.11, 0.14, 0.20));
+    const bagCol = hexToVec3(cfg.bagColor,    vec3(0.22, 0.28, 0.35));
     const white  = vec3(0.96, 0.96, 0.98);
-    const pants  = vec3(0.14, 0.22, 0.38);
     const visor  = vec3(0.15, 0.98, 0.85);
     const gold   = vec3(1.0, 0.84, 0.22);
+    const dark   = vec3(0.12, 0.12, 0.16);
+    const isF = gender === "F";
+    const hairStyle = cfg.hairStyle || "short";
+    const hatKind = cfg.hatKind === undefined ? "cap" : cfg.hatKind;
 
-    const swing = isWalking ? (0.34 * Math.sin(timeSec * 10.5)) : 0.0;
+    // Fase do passo / respiração
+    const phi = q ? (stepIdx / 24) * TAU : 0;
+    const idl = q ? 0 : (stepIdx / 10) * TAU;
+    const gait = q === 2 ? 1.0 : (q === 1 ? 0.6 : 0.0);
+    const A = 0.78 * gait;                                  // amplitude da coxa
+    const sP = Math.sin(phi), cP = Math.cos(phi);
+    const breath = Math.sin(idl);                           // só parado
+    const bob = -0.055 * gait * Math.abs(sP) + 0.008 * breath;
+    const hipY = 0.68 + bob;
+    const thighL = 0.33, shinL = 0.33;
 
-    appendBox(m, -0.18, 0.32,  swing, 0.11, 0.28, 0.12, pants, 0);
-    appendBox(m,  0.18, 0.32, -swing, 0.11, 0.28, 0.12, pants, 0);
-    appendBox(m, -0.18, 0.09,  swing + 0.06, 0.13, 0.09, 0.18, outfit, 0);
-    appendBox(m,  0.18, 0.09, -swing + 0.06, 0.13, 0.09, 0.18, outfit, 0);
-    appendBox(m, -0.18, 0.03,  swing + 0.08, 0.14, 0.03, 0.19, white, 0);
-    appendBox(m,  0.18, 0.03, -swing + 0.08, 0.14, 0.03, 0.19, white, 0);
+    // ---------- PERNAS (coxa + joelho dobrando + tênis) ----------
+    const legs = (side, ph) => {
+      const s = Math.sin(ph), c = Math.cos(ph);
+      const f = A * s;                                      // coxa à frente = positivo
+      const flex = gait * 1.05 * Math.max(0, c);            // joelho flexiona na fase de balanço
+      const hx = side * 0.13;
+      const kneeAng = -f;
+      const knee = appendLimbBox(m, hx, hipY, 0, 0.095, thighL, 0.105, kneeAng, pants);
+      const shinAng = kneeAng + flex;
+      const ankle = appendLimbBox(m, knee.x, knee.y, knee.z, 0.085, shinL, 0.095, shinAng, pants);
+      appendLimbBox(m, ankle.x, ankle.y + 0.02, ankle.z, 0.10, 0.085, 0.17, shinAng * 0.35, shoes, 0, 0.07);
+      appendLimbBox(m, ankle.x, ankle.y + 0.015, ankle.z, 0.102, 0.03, 0.172, shinAng * 0.35, dark, 0, 0.07, -0.055);
+    };
+    legs(-1, phi);
+    legs(1, phi + Math.PI);
 
-    if (gender === "F") {
-      appendCone(m, 0, 0.52, 0, 0, 1.12, 0, 0.36, outfit, outfit, 0.1);
-      appendEllipsoid(m, 0, 0.96, 0, 0.28, 0.32, 0.22, outfit, 8, 14, 0.1);
+    // ---------- TRONCO, BRAÇOS, CABEÇA (grupo que inclina/torce com a corrida) ----------
+    const upperStart = m.verts.length;
+    const shY = hipY + 0.62;                                // altura dos ombros
+    const shX = isF ? 0.265 : 0.31;
+
+    appendBox(m, 0, hipY + 0.05, 0, isF ? 0.215 : 0.20, 0.09, 0.125, pants, 0.05);          // pélvis
+    if (isF) {
+      appendCone(m, 0, hipY + 0.20, 0, 0, hipY - 0.12, 0, 0.30, outfit, outfit, 0.2);       // saia
+      appendEllipsoid(m, 0, hipY + 0.40, 0, 0.255, 0.27, 0.17, outfit, 8, 14, 0.1);         // tronco
     } else {
-      appendBox(m, 0, 0.92, 0, 0.30, 0.36, 0.21, outfit, 0.1);
+      appendBox(m, 0, hipY + 0.40, 0, 0.275, 0.29, 0.17, outfit, 0.1);                      // tronco
     }
-    appendBox(m, 0, 0.92, 0.19, 0.10, 0.34, 0.05, white, 0.1);
-    appendBox(m, 0, 0.60, 0.00, 0.31, 0.05, 0.22, vec3(0.15, 0.15, 0.18), 0.1);
-    appendEllipsoid(m, 0.16, 0.60, 0.22, 0.07, 0.07, 0.07, gold, 5, 8, 0.1);
-    appendBox(m, 0, 0.94, -0.24, 0.22, 0.26, 0.12, vec3(0.22, 0.28, 0.35), 0.1);
+    appendBox(m, 0, hipY + 0.40, 0.165, 0.085, 0.27, 0.025, white, 0.1);                    // faixa frontal
+    appendBox(m, 0, hipY + 0.13, 0.0, 0.285, 0.035, 0.18, dark, 0.1);                       // cinto
+    appendBox(m, 0, hipY + 0.13, 0.185, 0.045, 0.045, 0.02, gold, 0.1);                     // fivela
+    appendEllipsoid(m, 0.20, hipY + 0.10, 0.17, 0.065, 0.065, 0.065, vec3(0.92, 0.18, 0.16), 5, 9, 0.1); // Pokébola
+    appendBox(m, 0, shY - 0.02, 0.0, shX + 0.02, 0.05, 0.14, outfit, 0.1);                  // ombros
+    appendBox(m, 0, shY + 0.03, 0.14, 0.12, 0.03, 0.035, white, 0.1);                       // gola
 
-    appendEllipsoid(m, -0.38, 1.16, 0, 0.12, 0.12, 0.12, outfit, 6, 10, 0.15);
-    appendEllipsoid(m,  0.38, 1.16, 0, 0.12, 0.12, 0.12, outfit, 6, 10, 0.15);
-    appendBox(m, -0.40, 0.88, -swing * 0.85, 0.10, 0.28, 0.11, outfit, 0.2);
-    appendBox(m,  0.40, 0.88,  swing * 0.85, 0.10, 0.28, 0.11, outfit, 0.2);
-    appendBox(m, -0.40, 0.56, -swing * 0.85, 0.10, 0.09, 0.10, visor, 0.2);
-    appendBox(m,  0.40, 0.56,  swing * 0.85, 0.10, 0.09, 0.10, visor, 0.2);
+    // mochila
+    appendBox(m, 0, shY - 0.30, -0.22, 0.20, 0.27, 0.09, bagCol, 0.1);
+    appendBox(m, 0, shY - 0.14, -0.26, 0.17, 0.07, 0.07, outfit, 0.1);
+    appendBox(m, -0.17, shY - 0.22, 0.12, 0.035, 0.25, 0.04, bagCol, 0.1);                  // alças
+    appendBox(m,  0.17, shY - 0.22, 0.12, 0.035, 0.25, 0.04, bagCol, 0.1);
 
-    appendBox(m, 0, 1.30, 0, 0.11, 0.08, 0.11, skin, 0.2);
-    appendEllipsoid(m, 0, 1.54, 0.02, 0.27, 0.28, 0.27, skin, 9, 16, 0.2);
-    appendEyes3D(m, 1.54, 0.26, 0.11, 0.055);
+    // braços: balançam em oposição às pernas; cotovelo dobra para frente
+    const arms = (side, ph) => {
+      const s = Math.sin(ph);
+      const f = gait ? -0.92 * A * s : 0.05 * breath;       // braço à frente quando a perna do mesmo lado está atrás
+      const upAng = -f;
+      const open = 0.09 + 0.02 * breath * (gait ? 0 : 1);
+      const ax = side * (shX + 0.07);
+      const el = appendLimbBox(m, ax, shY - 0.03, 0, 0.082, 0.28, 0.09, upAng, outfit, side * open);
+      const bend = 0.28 + gait * 0.55 * Math.max(0, f / Math.max(0.01, A));
+      const foreAng = upAng - bend;
+      const wr = appendLimbBox(m, el.x, el.y, el.z, 0.072, 0.24, 0.08, foreAng, outfit, side * open * 0.4);
+      appendLimbBox(m, wr.x, wr.y + 0.05, wr.z, 0.078, 0.05, 0.085, foreAng, visor, 0);    // pulseira AR
+      appendEllipsoid(m, wr.x, wr.y - 0.035, wr.z + 0.0, 0.065, 0.065, 0.065, skin, 6, 10, 0.2);
+    };
+    arms(-1, phi + Math.PI);
+    arms(1, phi);
 
-    appendEllipsoid(m, 0, 1.70, -0.02, 0.29, 0.18, 0.29, outfit, 8, 14, 0.25);
-    appendBox(m, 0, 1.72, 0.18, 0.12, 0.08, 0.12, white, 0.25);
-    appendBox(m, 0, 1.66, 0.26, 0.24, 0.04, 0.18, outfit, 0.25);
-    appendBox(m, 0, 1.54, 0.28, 0.22, 0.06, 0.03, visor, 0.25);
-
-    if (gender === "F") {
-      appendCone(m, -0.24, 1.55, 0.0, -0.34, 1.18, 0.08, 0.10, hair, hair, 0.6);
-      appendCone(m,  0.24, 1.55, 0.0,  0.34, 1.18, 0.08, 0.10, hair, hair, 0.6);
-      appendCone(m,  0.00, 1.62, -0.26, 0.00, 1.12, -0.56, 0.15, hair, hair, 0.95);
-    } else {
-      appendCone(m, -0.24, 1.60, 0.05, -0.38, 1.48, 0.12, 0.09, hair, hair, 0.4);
-      appendCone(m,  0.24, 1.60, 0.05,  0.38, 1.48, 0.12, 0.09, hair, hair, 0.4);
+    // cabeça
+    const headY = shY + 0.31;
+    const nodY = 0.012 * breath + (q ? 0.02 * Math.abs(cP) : 0);
+    appendBox(m, 0, shY + 0.06, 0, 0.10, 0.07, 0.10, skin, 0.2);                            // pescoço
+    appendEllipsoid(m, 0, headY + nodY, 0.015, 0.265, 0.285, 0.265, skin, 10, 18, 0.2);     // crânio
+    appendEllipsoid(m, -0.262, headY - 0.02 + nodY, 0.0, 0.04, 0.07, 0.05, skin, 5, 8, 0.2); // orelhas
+    appendEllipsoid(m,  0.262, headY - 0.02 + nodY, 0.0, 0.04, 0.07, 0.05, skin, 5, 8, 0.2);
+    appendEyes3D(m, headY + 0.02 + nodY, 0.262, 0.105, 0.052, eyeCol);
+    appendBox(m, 0, headY - 0.095 + nodY, 0.262, 0.05, 0.012, 0.02, vec3(0.55, 0.22, 0.22), 0.2); // boca
+    appendBox(m, 0, headY - 0.03 + nodY, 0.275, 0.018, 0.03, 0.018, skin, 0.2);              // nariz
+    if (cfg.glasses) {
+      appendBox(m, -0.105, headY + 0.02 + nodY, 0.292, 0.085, 0.07, 0.012, visor, 0.2);
+      appendBox(m,  0.105, headY + 0.02 + nodY, 0.292, 0.085, 0.07, 0.012, visor, 0.2);
+      appendBox(m, 0, headY + 0.035 + nodY, 0.292, 0.03, 0.012, 0.012, dark, 0.2);
     }
 
-    return recomputeNormals(m);
+    // cabelo
+    const hy = headY + nodY;
+    const hasHat = hatKind === "cap" || hatKind === "beanie";
+    if (hairStyle !== "bald") {
+      if (!hasHat) {
+        appendEllipsoid(m, 0, hy + 0.07, -0.03, 0.285, 0.22, 0.285, hair, 8, 16, 0.25);
+        appendBox(m, 0, hy + 0.20, 0.19, 0.21, 0.05, 0.08, hair, 0.25);                     // franja
+      } else {
+        appendEllipsoid(m, 0, hy + 0.0, -0.06, 0.28, 0.25, 0.26, hair, 8, 14, 0.25);        // cabelo visível sob o chapéu
+      }
+      const sway = Math.sin(idl + 1.2) * 0.04 + (q ? -0.12 * sP : 0);
+      if (hairStyle === "spiky" && !hasHat) {
+        for (let i = 0; i < 6; ++i) {
+          const a = (i / 6) * TAU;
+          appendCone(m, Math.cos(a) * 0.16, hy + 0.2, Math.sin(a) * 0.16 - 0.02,
+            Math.cos(a) * 0.3, hy + 0.5 + (i & 1) * 0.06, Math.sin(a) * 0.3 - 0.02, 0.07, hair, hair, 0.5);
+        }
+      } else if (hairStyle === "long") {
+        appendEllipsoid(m, 0, hy - 0.24, -0.20, 0.27, 0.42, 0.12, hair, 8, 12, 0.7);
+        appendBox(m, -0.27, hy - 0.10, 0.0, 0.035, 0.22, 0.10, hair, 0.5);
+        appendBox(m,  0.27, hy - 0.10, 0.0, 0.035, 0.22, 0.10, hair, 0.5);
+      } else if (hairStyle === "pony") {
+        appendCone(m, 0, hy + 0.10, -0.27, sway, hy - 0.42, -0.42, 0.12, hair, hair, 0.95);
+      } else if (hairStyle === "bun" && !hasHat) {
+        appendEllipsoid(m, 0, hy + 0.34, -0.10, 0.12, 0.12, 0.12, hair, 6, 10, 0.4);
+      }
+    }
+    if (hatKind === "cap") {
+      appendEllipsoid(m, 0, hy + 0.10, 0.0, 0.295, 0.19, 0.295, outfit, 8, 16, 0.25);
+      appendBox(m, 0, hy + 0.06, 0.30, 0.215, 0.022, 0.15, outfit, 0.25);                   // aba
+      appendBox(m, 0, hy + 0.115, 0.285, 0.075, 0.06, 0.012, white, 0.25);                  // emblema
+      appendBox(m, 0, hy + 0.045, 0.28, 0.23, 0.012, 0.012, visor, 0.25);                   // faixa AR
+    } else if (hatKind === "beanie") {
+      appendEllipsoid(m, 0, hy + 0.12, 0.0, 0.30, 0.22, 0.30, outfit, 8, 16, 0.25);
+      appendBox(m, 0, hy + 0.01, 0.0, 0.305, 0.04, 0.305, white, 0.25);                     // barra
+      appendEllipsoid(m, 0, hy + 0.36, 0.0, 0.07, 0.07, 0.07, white, 5, 8, 0.4);            // pompom
+    }
+
+    // Inclinação e torção do tronco (corrida): rotaciona só o que foi adicionado depois das pernas
+    if (gait > 0) twistRange(m, upperStart, hipY, 0.09 * gait, -0.20 * gait * sP);
+
+    recomputeNormals(m);
+    AVATAR_CACHE.set(key, m);
+    return m;
   }
 
   function buildPokestop3DMesh(isCooldown = false) {
@@ -1626,6 +1785,7 @@ window.PokeAsciiEngine = window.Ascii3DEngine = (function() {
     mat4View6DoF, mat4LookAtBasis, mat4Perspective, projectPoint3D,
     computeVisualScale,
     getPokemonMesh,
+    getMeshBounds,
     sampleGlbTexture,
     sampleGlbTextureInto,
     buildPokeballMesh,
