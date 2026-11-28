@@ -555,6 +555,10 @@ window.PokeData = (function() {
       if (sp.spawnWeight < 25) {
         w *= medal.rareWeightMult;
       }
+      // Clima real do local (weather.js): tipos favorecidos pelo tempo aparecem mais (x1.8)
+      if (window.PokeWeather) {
+        w *= window.PokeWeather.spawnMult(sp.types);
+      }
       return w;
     }
 

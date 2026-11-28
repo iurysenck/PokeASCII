@@ -63,8 +63,12 @@ Fonte: https://pokeapi.co/docs/v2 (seção *Fair Use Policy*)
 - Guia: uso casual < ~10 000 consultas/dia e < 1 GB/dia; uso automatizado regular **muito menor**; **o total conta por aplicativo**, não por usuário; identificar com `User-Agent`/`Referer`; no máx. 2 slots simultâneos por IP; em 429/504 aguardar.
 - **Decisão:** não consultar Overpass a partir do cliente de cada jogador em massa. Gerar **arquivos estáticos de Pontos de Parada por cidade** (script offline) e publicá-los no próprio site; o cliente só lê JSON estático.
 
-### Clima (planejado v0.2)
-- **Open-Meteo** — dados CC BY 4.0; API gratuita para uso não comercial com atribuição — https://open-meteo.com/en/license *(verificar limites atuais)*.
+### Clima (implementado — `web/js/weather.js`)
+- **Open-Meteo** — dados CC BY 4.0; API gratuita para uso não comercial com atribuição — https://open-meteo.com/en/license *(verificar limites atuais)*. Atribuição: "Weather data by Open-Meteo.com".
+- **Privacidade:** o app envia **só latitude/longitude arredondadas a 2 casas (~1 km)**, sem Referer nem cookies (`referrerPolicy: no-referrer`, `credentials: omit`); o IP é visível à Open-Meteo como em qualquer requisição. No máximo 1 consulta a cada 15 min (cache em `localStorage`, chave `pokeascii_weather_v1`, validado campo a campo). A posição exata do GPS nunca é guardada pelo módulo. Nenhuma consulta é feita antes de o GPS responder; se for negado/demorar 5 s, usa a coordenada do mapa virtual (centro de SP) e a pílula mostra "local padrão: GPS off". Opt-out: `localStorage.pokeascii_weather_optout = "1"` (ou `PokeWeather.setOptOut(true)`) desliga toda rede do clima; sem rede, cai para o relógio do aparelho (dia/noite) e céu limpo.
+- **Spawns:** só o clima REAL influencia spawns; o modo "simulado" (toque na pílula) é puramente visual.
+- **Acessibilidade:** o relâmpago respeita `prefers-reduced-motion` (desligado), tem amplitude baixa (~10%) e no máximo 2 pulsos a cada 6+ s; com reduced-motion, chuva/neve e nuvens ficam 4x mais lentas.
+- A resposta é tratada como dado não confiável: só números finitos dentro de limites sãos entram no estado do jogo.
 
 ## 3. Referências de conteúdo (somente consulta)
 

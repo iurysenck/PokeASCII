@@ -217,8 +217,8 @@ window.PokeGameUI = (function() {
   const GI_MIDDOT = CHAR_TO_IDX.get("·");
 
   // Níveis de subamostragem [ssx, ssy] por célula. 0 = legado (1 amostra/célula).
-  const SS_LEVELS = [[1, 1], [2, 2], [2, 3]];
-  let ssLevel = isMobileDevice ? 1 : 2;
+  const SS_LEVELS = [[1, 1], [2, 2], [2, 3], [3, 3]];
+  let ssLevel = isMobileDevice ? 1 : 3;     // desktop começa em 3x3; o governador reduz se faltar FPS
   let governorEnabled = true;       // governador de FPS automático (desligado por setSubsampling)
   const GOVERNOR_GRACE_MS = 6000;   // ignora quedas de FPS durante o carregamento inicial (GLB/texturas)
   let ssCeiling = SS_LEVELS.length - 1, goodFpsSeconds = 0, ssUpgradedAt = -1e9;
@@ -227,11 +227,12 @@ window.PokeGameUI = (function() {
   const CONTRAST_EDGE = 0.16;       // entidade com silhueta/vinco 3D dentro da célula
   const CONTRAST_TEXTURE = 0.34;    // interior liso de entidade: só vira forma com detalhe forte (olhos, listras)
                                     // (abaixo disso usa densidade/sombreado, que lê melhor que "ruído de glifos")
-  const MAX_SS_SAMPLES = 6;
+  const MAX_SS_SAMPLES = 9;         // 3x3 -> chave de padrão de 18 bits (cache de 256 KB)
   const SCR_R = new Float32Array(MAX_SS_SAMPLES), SCR_G = new Float32Array(MAX_SS_SAMPLES);
   const SCR_B = new Float32Array(MAX_SS_SAMPLES), SCR_INK = new Float32Array(MAX_SS_SAMPLES);
   const LEGACY_DIR_IDX = [0, CHAR_TO_IDX.get("|"), CHAR_TO_IDX.get("-"), CHAR_TO_IDX.get("/"), CHAR_TO_IDX.get("\\")];
   const GI_O = CHAR_TO_IDX.get("o");
+  const GI_APOS = CHAR_TO_IDX.get("'"), GI_SNOW_A = CHAR_TO_IDX.get("*");
   let legacyLuma = null, legacyMag = null, legacyDir = null; // só no nível 1x1 (bordas Sobel por célula)
   let glyphShape = null;            // Float32Array(G * S): cobertura normalizada de cada glifo por sub-bloco
   let glyphUsable = null;           // Uint8Array(G): glifo tem contraste interno suficiente
@@ -734,6 +735,35 @@ window.PokeGameUI = (function() {
     }
   }
 
+  // Pílula de clima + aviso dos tipos favorecidos (clima real via weather.js / Open-Meteo)
+  let lastWeatherToastKey = "";
+  function updateWeatherHud(info) {
+    const pill = document.getElementById("weather-pill");
+    if (pill && info) {
+      pill.textContent = info.text;
+      pill.style.borderColor = info.simulated ? "#fde047" : "rgba(160, 200, 255, 0.40)";
+    }
+    if (!info || info.simulated || info.source === "device") return;
+    const key = `${info.kind}|${info.source}`;
+    if (key === lastWeatherToastKey) return;
+    lastWeatherToastKey = key;
+    const types = window.PokeWeather ? window.PokeWeather.boostedTypes() : [];
+    if (types.length > 0) {
+      window.PokeStorage.showToast(`${info.text} — Tipos em alta: ${types.join(", ")}`, "info");
+    }
+  }
+
+  function cycleWeather() {
+    window.PokeAudio.playUiClick();
+    if (!window.PokeWeather) return;
+    const info = window.PokeWeather.cycleOverride();
+    window.PokeStorage.showToast(
+      info.simulated ? `[CLIMA] Simulando: ${info.label}. Toque de novo para trocar; ao fim do ciclo volta ao clima real.`
+                     : "[CLIMA] Clima real do seu local reativado.",
+      "info"
+    );
+  }
+
   function toggleNavModeOrResyncGps() {
     window.PokeAudio.playUiClick();
     if (cityState.navMode === "JOYSTICK_FREE") {
@@ -790,10 +820,16 @@ window.PokeGameUI = (function() {
 
         updateGpsPillUI();
         fetchRealOpenStreetMapAround(lat, lon);
+        if (window.PokeWeather) window.PokeWeather.setLocation(lat, lon);
       },
       () => {
         cityState.navMode = "JOYSTICK_FREE";
         updateGpsPillUI();
+        // GPS negado/indisponível: clima do local padrão do mapa virtual
+        if (window.PokeWeather && window.PokeWeather.state.lat === null) {
+          const v = getVirtualLatLon();
+          window.PokeWeather.setLocation(v.lat, v.lon, true);
+        }
       },
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 5000 }
     );
@@ -1402,6 +1438,70 @@ window.PokeGameUI = (function() {
   }
 
   // ============================================================================
+  // CLIMA NO RENDERER: visual vindo de window.PokeWeather (weather.js). Sem o módulo, usa o céu
+  // crepuscular original. Nuvens = ruído fbm 256x256 projetado numa "cúpula" (perspectiva até o horizonte).
+  // ============================================================================
+  const WXV = window.PokeWeather ? window.PokeWeather.visual : {
+    zenith: [0.14, 0.22, 0.52], horizon: [0.78, 0.48, 0.56], cloudCol: [0.7, 0.45, 0.5], fogCol: [0.22, 0.24, 0.44],
+    cover: 0.05, starAmt: 0.5, fogK: 0.015, groundMul: 1, lightMul: 1, snowAmt: 0, dayFactor: 0.5,
+    cloudScrollX: 0, cloudScrollZ: 0, precip: 0, precipDens: 0, precipSlant: 0, precipLen: 0, flash: 0
+  };
+  const CLOUD_N = 256;
+  const cloudTex = new Float32Array(CLOUD_N * CLOUD_N);
+  (function buildCloudTexture() {
+    let seed = 0x9e3779b9;
+    const rnd = () => {
+      seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const octaves = [[8, 0.55], [16, 0.30], [32, 0.15]];
+    for (const [n, w] of octaves) {
+      const lat = new Float32Array(n * n);
+      for (let i = 0; i < lat.length; ++i) lat[i] = rnd();
+      for (let y = 0; y < CLOUD_N; ++y) {
+        const v = y / CLOUD_N * n, j0 = Math.floor(v), fv = v - j0, sv = fv * fv * (3 - 2 * fv);
+        const r0 = (j0 % n) * n, r1 = ((j0 + 1) % n) * n;
+        for (let x = 0; x < CLOUD_N; ++x) {
+          const u = x / CLOUD_N * n, i0 = Math.floor(u), fu = u - i0, su = fu * fu * (3 - 2 * fu);
+          const i1 = (i0 + 1) % n;
+          const a = lat[r0 + i0] + (lat[r0 + i1] - lat[r0 + i0]) * su;
+          const b = lat[r1 + i0] + (lat[r1 + i1] - lat[r1 + i0]) * su;
+          cloudTex[y * CLOUD_N + x] += (a + (b - a) * sv) * w;
+        }
+      }
+    }
+  })();
+
+  // Precipitação em células: cada coluna tem até 2 "gotas" (camadas) com velocidade/fase próprias.
+  let precipCols = 0;
+  let pRand0 = null, pRand1 = null, pSpeed = null, pPhase = null, pHead = null, pActive = null;
+  function ensurePrecipColumns() {
+    if (precipCols === cols) return;
+    precipCols = cols;
+    pRand0 = new Float32Array(cols); pRand1 = new Float32Array(cols);
+    pSpeed = new Float32Array(cols * 2); pPhase = new Float32Array(cols * 2);
+    pHead = new Float32Array(cols * 2); pActive = new Uint8Array(cols * 2);
+    for (let c = 0; c < cols; ++c) {
+      pRand0[c] = Math.random(); pRand1[c] = Math.random();
+      pSpeed[c] = 14 + Math.random() * 12; pSpeed[cols + c] = 9 + Math.random() * 9;
+      pPhase[c] = Math.random(); pPhase[cols + c] = Math.random();
+    }
+  }
+  function updatePrecipColumns(timeSec) {
+    const dens = WXV.precipDens, len = WXV.precipLen;
+    const k0 = (WXV.precip === 2 ? 0.22 : 1.0) * (WXV.motion || 1); // motion < 1 com prefers-reduced-motion
+    const cycle = rows + len + 6;
+    for (let c = 0; c < cols; ++c) {
+      pActive[c] = pRand0[c] < dens ? 1 : 0;
+      pActive[cols + c] = pRand1[c] < dens * 0.7 ? 1 : 0;
+      pHead[c] = ((timeSec * pSpeed[c] * k0 + pPhase[c] * cycle) % cycle) - len;
+      pHead[cols + c] = ((timeSec * pSpeed[cols + c] * k0 + pPhase[cols + c] * cycle) % cycle) - len;
+    }
+  }
+
+  // ============================================================================
   // SOMBRAS DE CONTATO NO CHÃO (grade 512x512 a 0,25 m, estampada a cada frame)
   // Cada entidade estampa discos suaves ao longo da direção oposta ao sol; o fundo só consulta a grade
   // (bilinear), então o custo é pequeno e a sombra fica colada ao chão em qualquer zoom.
@@ -1534,6 +1634,8 @@ window.PokeGameUI = (function() {
       const hasShadow = shadowCount > 0;
       const ndcStep = (2.0 * aspect * fovScale) / sw;
       const ndcX0 = (1.0 / sw - 1.0) * aspect * fovScale;
+      const fogR = WXV.fogCol[0], fogG = WXV.fogCol[1], fogB = WXV.fogCol[2];
+      const gm = WXV.groundMul, snowAmt = WXV.snowAmt, fogK = WXV.fogK;
 
       for (let y = 0; y < sh; ++y) {
         const ndcY = (1.0 - 2.0 * ((y + 0.5) / sh)) * fovScale;
@@ -1541,20 +1643,43 @@ window.PokeGameUI = (function() {
         const rowOff = y * sw;
 
         if (ryW >= -0.008) {
-          // Céu Crepuscular Pokémon GO
+          // Céu dirigido pelo clima/horário real: gradiente horizonte->zênite, nuvens em perspectiva e estrelas
           const skyT = Math.min(1, Math.max(0, ryW * 2.2));
-          const bR = 0.78 * (1 - skyT) + 0.14 * skyT;
-          const bG = 0.48 * (1 - skyT) + 0.22 * skyT;
-          const bB = 0.56 * (1 - skyT) + 0.52 * skyT;
+          const hz = WXV.horizon, zn = WXV.zenith, cc = WXV.cloudCol;
+          const bR = hz[0] * (1 - skyT) + zn[0] * skyT;
+          const bG = hz[1] * (1 - skyT) + zn[1] * skyT;
+          const bB = hz[2] * (1 - skyT) + zn[2] * skyT;
           const glowK = (1 - skyT) * 0.25;
+          const starAmt = WXV.starAmt;
+          const cover = WXV.cover;
+          const cloudOn = cover > 0.06;
+          let hf = 0;
+          if (cloudOn) { const q = Math.min(1, Math.max(0, (ryW - 0.01) / 0.25)); hf = q * q * (3 - 2 * q); }
+          const thr = 1.0 - cover * 1.15;
+          const invRy = 0.22 / Math.max(ryW, 0.06);
+          const rowCx = f.x + ndcY * u.x, rowCz = f.z + ndcY * u.z;
+          const csx = WXV.cloudScrollX, csz = WXV.cloudScrollZ;
           for (let x = 0; x < sw; ++x) {
             const idx = rowOff + x;
             let R = bR, G = bG, B = bB;
-            if (skyT > 0.3) {
-              // Estrelas cintilantes (hash por amostra): ~0,3% das amostras do céu alto
+            if (cloudOn && hf > 0.001) {
+              const ndcX = ndcX0 + x * ndcStep;
+              const cu = (rowCx + ndcX * s.x) * invRy + csx;
+              const cv = (rowCz + ndcX * s.z) * invRy + csz;
+              const n = cloudTex[(((((cv - Math.floor(cv)) * CLOUD_N) | 0) & 255) << 8) | ((((cu - Math.floor(cu)) * CLOUD_N) | 0) & 255)];
+              let d = (n - (thr - 0.08)) * 3.3;
+              d = d < 0 ? 0 : (d > 1 ? 1 : d);
+              d = d * d * (3 - 2 * d) * hf * 0.92;
+              if (d > 0.01) {
+                const shade = 0.78 + 0.44 * n;
+                R += (cc[0] * shade - R) * d; G += (cc[1] * shade - G) * d; B += (cc[2] * shade - B) * d;
+              }
+            }
+            if (starAmt > 0.03 && skyT > 0.3) {
+              // Estrelas cintilantes (hash por amostra): ~0,3% das amostras do céu alto, só à noite e sem nuvem
               const hs = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663)) >>> 0;
               if ((hs & 1023) < 3) {
-                const tw = (0.5 + 0.5 * Math.sin(timeSec * 3.0 + (hs >>> 10))) * 0.6 * skyT;
+                const tw = (0.5 + 0.5 * Math.sin(timeSec * 3.0 + (hs >>> 10))) * 0.6 * skyT * starAmt;
                 R += tw; G += tw; B += tw * 1.1;
               }
             }
@@ -1570,7 +1695,7 @@ window.PokeGameUI = (function() {
         }
 
         const tHit = (groundY - eye.y) / ryW;
-        const fog = Math.exp(-Math.max(0, tHit) * 0.015);
+        const fog = Math.exp(-Math.max(0, tHit) * fogK);
         const invFog = 1 - fog;
         const bx = eye.x + (f.x + ndcY * u.x) * tHit;
         const bz = eye.z + (f.z + ndcY * u.z) * tHit;
@@ -1616,9 +1741,13 @@ window.PokeGameUI = (function() {
             else if (ct === 5) { gR = 0.34; gG = 0.52; gB = 0.84; }
             else if (ct === 4) { gR = 0.18; gG = 0.27; gB = 0.54; }
 
-            camR[idx] = gR * fog + 0.22 * invFog;
-            camG[idx] = gG * fog + 0.24 * invFog;
-            camB[idx] = gB * fog + 0.44 * invFog;
+            if (ct === 0 && snowAmt > 0) {
+              // Neve acumulada: clareia só o terreno (ruas/prédios continuam legíveis)
+              gR += (0.72 - gR) * snowAmt; gG += (0.78 - gG) * snowAmt; gB += (0.92 - gB) * snowAmt;
+            }
+            camR[idx] = gR * gm * fog + fogR * invFog;
+            camG[idx] = gG * gm * fog + fogG * invFog;
+            camB[idx] = gB * gm * fog + fogB * invFog;
           } else if (isBattle) {
             const arenaRing = Math.abs(Math.hypot(wx, wz + 3.8) - 3.2) < 0.22;
             const centerLine = Math.abs(wz + 3.8) < 0.12 && Math.abs(wx) < 3.4;
@@ -1629,14 +1758,14 @@ window.PokeGameUI = (function() {
             } else if (((Math.floor(wx) + Math.floor(wz)) & 1) === 0) {
               gR = 0.13; gG = 0.22; gB = 0.40;
             }
-            camR[idx] = gR * fog + 0.15 * invFog;
-            camG[idx] = gG * fog + 0.22 * invFog;
-            camB[idx] = gB * fog + 0.38 * invFog;
+            camR[idx] = gR * gm * fog + fogR * invFog;
+            camG[idx] = gG * gm * fog + fogG * invFog;
+            camB[idx] = gB * gm * fog + fogB * invFog;
           } else {
             const checker = ((Math.floor(wx * 1.4) + Math.floor(wz * 1.4)) & 1) ? 0.18 : 0.13;
-            camR[idx] = (checker * 0.42) * fog + 0.15 * invFog;
-            camG[idx] = (checker * 1.40) * fog + 0.32 * invFog;
-            camB[idx] = (checker * 0.68) * fog + 0.35 * invFog;
+            camR[idx] = (checker * 0.42) * gm * fog + fogR * invFog;
+            camG[idx] = (checker * 1.40) * gm * fog + fogG * invFog;
+            camB[idx] = (checker * 0.68) * gm * fog + fogB * invFog;
           }
 
           if (hasShadow) {
@@ -2087,6 +2216,11 @@ window.PokeGameUI = (function() {
     const lightDir = E.norm3({ x: 0.45, y: 0.82, z: 0.35 });
     const ldx = lightDir.x, ldy = lightDir.y, ldz = lightDir.z;
     const texOut = TEX_SAMPLE_OUT;
+    const wxOn = gameScene !== "EVOLUTION_CUTSCENE";   // cutscene cósmica não sofre clima
+    const wxLight = wxOn ? WXV.lightMul : 1;
+    const fogE = WXV.fogK - 0.015;               // névoa extra do clima (0 em tempo limpo: entidades intactas)
+    const fogOn = wxOn && fogE > 0.002;
+    const fcR = WXV.fogCol[0], fcG = WXV.fogCol[1], fcB = WXV.fogCol[2];
     // LOD de triângulos só no nível legado: com subamostragem, remover triângulos abre furos visíveis.
     const allowLod = ssLevel === 0;
 
@@ -2211,9 +2345,9 @@ window.PokeGameUI = (function() {
               c1x = c1.x; c1y = c1.y; c1z = c1.z;
               c2x = c2.x; c2y = c2.y; c2z = c2.z;
               activeTex = (meshTextures && v0.texIdx !== undefined && v0.texIdx >= 0) ? meshTextures[v0.texIdx] : null;
+              iw0 = vBufIw[i0]; iw1 = vBufIw[i1]; iw2 = vBufIw[i2];
               if (activeTex) {
                 // Interpolação perspectiva-correta de UV (1/w por vértice): sem "nadar" de textura em zoom-in
-                iw0 = vBufIw[i0]; iw1 = vBufIw[i1]; iw2 = vBufIw[i2];
                 u0 = v0.u * iw0; u1 = v1.u * iw1; u2 = v2.u * iw2;
                 tv0 = v0.v * iw0; tv1 = v1.v * iw1; tv2 = v2.v * iw2;
               }
@@ -2257,7 +2391,7 @@ window.PokeGameUI = (function() {
             const rim = rimT * rimT * Math.sqrt(Math.sqrt(rimT)) * 0.38;
             const d2 = ndotl * ndotl, d4 = d2 * d2, d8 = d4 * d4;
             const spec = d8 * d2 * 0.14;
-            gbLight[idx] = Math.min(1.42, hemi + 0.72 * ndotl + rim + spec);
+            gbLight[idx] = Math.min(1.42, (hemi + 0.72 * ndotl + rim + spec) * wxLight);
 
             if (tintLaser) {
               gbColR[idx] = 1.0;
@@ -2273,6 +2407,14 @@ window.PokeGameUI = (function() {
               gbColR[idx] = texR * (0.90 + 0.20 * ndotl);
               gbColG[idx] = texG * (0.97 + 0.07 * ndotl);
               gbColB[idx] = texB * (1.10 - 0.24 * ndotl);
+              if (fogOn) {
+                // Névoa/chuva também afeta as entidades (profundidade = 1 / soma(w_i * (1/w_vertice_i)))
+                const depth = 1.0 / (w0 * iw0 + w1 * iw1 + w2 * iw2);
+                const ff = 1.0 - Math.exp(-fogE * depth);
+                gbColR[idx] += (fcR - gbColR[idx]) * ff;
+                gbColG[idx] += (fcG - gbColG[idx]) * ff;
+                gbColB[idx] += (fcB - gbColB[idx]) * ff;
+              }
             }
           }
         }
@@ -2298,6 +2440,21 @@ window.PokeGameUI = (function() {
     const shadeLast = SHADE_IDX.length - 1;
     const scrR = SCR_R, scrG = SCR_G, scrB = SCR_B, scrInk = SCR_INK;
     if (!structureOn) computeLegacyEdges();
+    const wxActive = gameScene !== "EVOLUTION_CUTSCENE";
+    const precipKind = wxActive ? WXV.precip : 0;
+    const flashAdd = wxActive ? ((WXV.flash * 90) | 0) : 0;
+    let pcR = 0, pcG = 0, pcB = 0, pGlyph = 0, pSlantCols = 0;
+    if (precipKind > 0) {
+      ensurePrecipColumns();
+      updatePrecipColumns(timeSec);
+      const lum = 0.55 + 0.45 * WXV.dayFactor;
+      if (precipKind === 2) { pcR = 240 * lum; pcG = 245 * lum; pcB = 255 * lum; }
+      else { pcR = 175 * lum; pcG = 205 * lum; pcB = 255 * lum; }
+      pSlantCols = WXV.precipSlant;
+      pGlyph = precipKind === 3 ? GI_APOS
+        : (pSlantCols < -0.07 ? CHAR_TO_IDX.get("/") : (pSlantCols > 0.07 ? CHAR_TO_IDX.get("\\") : CHAR_TO_IDX.get("|")));
+    }
+    const pLen = WXV.precipLen;
 
     if (!useFastBlit) {
       ctx.fillStyle = "#081024";
@@ -2463,6 +2620,26 @@ window.PokeGameUI = (function() {
             else if (centerCt === 1) gi = GI_MIDDOT;
             else gi = ((r + c) & 1) === 0 ? GI_DOT : GI_COMMA;
           }
+        }
+
+        // 2c) Clima: precipitação sobre a célula (gotas/flocos animados) e clarão de relâmpago
+        if (precipKind > 0 && (entCount === 0 || ((r + c) & 1) === 0)) {
+          let cc = c;
+          if (precipKind === 2) cc += Math.round(Math.sin(timeSec * 0.7 + r * 0.25 + c * 0.9) * 1.0);
+          else cc += Math.round(pSlantCols * r);
+          cc = ((cc % cols) + cols) % cols;
+          let hit = -1;
+          if (pActive[cc] && r - pHead[cc] >= 0 && r - pHead[cc] < pLen) hit = 0;
+          else if (pActive[cols + cc] && r - pHead[cols + cc] >= 0 && r - pHead[cols + cc] < pLen) hit = 1;
+          if (hit >= 0) {
+            gi = precipKind === 2 ? (hit === 0 ? GI_SNOW_A : GI_DOT) : pGlyph;
+            fgR = (fgR * 0.2 + pcR * 0.8) | 0; fgG = (fgG * 0.2 + pcG * 0.8) | 0; fgB = (fgB * 0.2 + pcB * 0.8) | 0;
+            if (precipKind !== 2) { bgR = (bgR * 0.9) | 0; bgG = (bgG * 0.92) | 0; bgB = (bgB * 0.96) | 0; }
+          }
+        }
+        if (flashAdd > 0) {
+          bgR = Math.min(255, bgR + flashAdd); bgG = Math.min(255, bgG + flashAdd); bgB = Math.min(255, bgB + flashAdd);
+          fgR = Math.min(255, fgR + flashAdd); fgG = Math.min(255, fgG + flashAdd); fgB = Math.min(255, fgB + flashAdd);
         }
 
         // 3) Blit do glifo (atlas anti-aliased) com cores fg/bg da célula
@@ -4902,6 +5079,7 @@ window.PokeGameUI = (function() {
     updatePokeballPhysics(dt);
 
     // 100% PURE 3D G-BUFFER ASCII RENDERING PIPELINE EM TODAS AS CENAS!
+    if (window.PokeWeather) window.PokeWeather.tick(timeSec);
     const tR0 = performance.now();
     rasterize3DScene(timeSec);
     const tR1 = performance.now();
@@ -4923,6 +5101,18 @@ window.PokeGameUI = (function() {
 
     resizeViewport();
     window.addEventListener("resize", resizeViewport);
+    if (window.PokeWeather) {
+      window.PokeWeather.onChange(updateWeatherHud);
+      updateWeatherHud(window.PokeWeather.describe());
+      // Nenhuma consulta antes de saber o local: o GPS real chama setLocation ao responder; se negar/demorar
+      // (5 s), usa o centro do mapa virtual (SP) como local padrão. A UI já avisa na pílula (via title).
+      setTimeout(() => {
+        if (window.PokeWeather.state.lat === null) {
+          const v = getVirtualLatLon();
+          window.PokeWeather.setLocation(v.lat, v.lon, true);
+        }
+      }, 5000);
+    }
     try {
       applyAsciiUiModeState(localStorage.getItem("pokeascii_ui_mode_v1") === "1");
     } catch (_) {}
@@ -4973,6 +5163,8 @@ window.PokeGameUI = (function() {
     cycleAsciiDetailTier,
     toggleAsciiUiMode,
     adjustZoom,
+    cycleWeather,
+    setWeather: (kind) => { if (window.PokeWeather) window.PokeWeather.setOverride(kind); },
     getRenderInfo: () => ({ cols, rows, cellW, cellH, ssx, ssy, ssLevel, qualityTier, fps: currentFps, perfMs: { ...perfMs } }),
     // Fixa o nível de subamostragem (0..2) e desliga o governador automático; útil para testes/benchmarks.
     setSubsampling: (level) => { governorEnabled = false; ssLevel = Math.max(0, Math.min(SS_LEVELS.length - 1, level | 0)); resizeViewport(); },

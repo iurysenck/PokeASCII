@@ -85,7 +85,7 @@ Meta: qualquer pessoa abre a URL pública e joga o ciclo completo *criar persona
 - [ ] **Ovos** (2/5/10 km) com incubadoras; distância por GPS real ou passos simulados
 - [ ] **Pontos de Parada** a partir do OpenStreetMap (Overpass → cache; filtros de segurança)
 - [ ] Mapa real com tiles legais (OpenFreeMap/PMTiles + MapLibre), atribuição "© OpenStreetMap contributors"
-- [ ] **Clima** (Open-Meteo ou similar) afetando spawns e visual
+- [x] **Clima** (Open-Meteo) afetando spawns e visual — `web/js/weather.js`: céu/nuvens/estrelas por horário e clima reais, chuva/garoa/neve/névoa/tempestade (relâmpago respeita `prefers-reduced-motion`), tipos favorecidos x1.8; toque na pílula `[CLIMA]` simula outros climas
 - [ ] Anti-abuso de caminhada (limite de velocidade: acima de ~10 m/s não conta)
 - [ ] Modo "Caminhada comunitária": metas semanais de distância (local, sem servidor)
 

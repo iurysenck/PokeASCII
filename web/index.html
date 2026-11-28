@@ -53,6 +53,22 @@
     max-width: 62vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
+  #weather-pill {
+    position: absolute; top: 44px; left: 12px;
+    background: rgba(18, 30, 68, 0.72); color: #e6f7ff;
+    border: 1px solid rgba(160, 200, 255, 0.40);
+    border-radius: 20px; padding: 4px 11px; font-size: 10.5px; font-weight: 700;
+    backdrop-filter: blur(6px); z-index: 12; cursor: pointer;
+    max-width: 62vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  body.ascii-ui-mode #weather-pill {
+    background: rgba(6, 13, 28, 0.94) !important;
+    color: #9ad0ff !important;
+    border: 1.5px dashed #26ccaa !important;
+    border-radius: 0 !important;
+    box-shadow: 3px 3px 0 rgba(38, 204, 170, 0.35) !important;
+  }
+
   /* Botões circulares flutuantes no topo-direito (Bússola/Câmera/Zoom) */
   #right-floating-tools {
     position: absolute; top: 12px; right: 12px;
@@ -687,6 +703,9 @@
   <div id="gps-pill" onclick="window.PokeGameUI.toggleNavModeOrResyncGps()" title="Toque para alternar entre GPS Live e Joystick Livre">
     [GPS LIVE] Localizando sua rua...
   </div>
+  <div id="weather-pill" onclick="window.PokeGameUI.cycleWeather()" title="Clima do local onde você está (Open-Meteo). Toque para simular outros climas e voltar ao real.">
+    [CLIMA] Consultando...
+  </div>
 
   <div id="right-floating-tools">
     <div class="circle-tool-btn" onclick="window.PokeGameUI.adjustZoom(-3.2)" title="Aumentar Zoom (+)">
@@ -917,9 +936,10 @@
   </div>
 </div>
 
-<script src="js/pokedex_data.js?v=20"></script>
-<script src="js/audio_and_storage.js?v=20"></script>
-<script src="js/ascii_3d_engine.js?v=20"></script>
-<script src="js/game_ui.js?v=20"></script>
+<script src="js/pokedex_data.js?v=21"></script>
+<script src="js/audio_and_storage.js?v=21"></script>
+<script src="js/weather.js?v=21"></script>
+<script src="js/ascii_3d_engine.js?v=21"></script>
+<script src="js/game_ui.js?v=21"></script>
 </body>
 </html>
